@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import socket
 import ssl
@@ -23,6 +24,7 @@ DATA_PATH = Path("/data/mappings.json")
 SOCKET_PATH = Path("/run/nginx-agent.sock")
 AGENT_TIMEOUT_SECONDS = 10
 PING_TIMEOUT_SECONDS = 5
+MAX_CERT_UPLOAD_BYTES = 256 * 1024
 
 app = Flask(__name__)
 
@@ -113,6 +115,23 @@ def ping_mapping(port):
     return jsonify({"port": safe_port, "remote_url": mapping["remote_url"], **result})
 
 
+@app.get("/api/certificates/status")
+def get_certificate_status():
+    return jsonify(certificate_status())
+
+
+@app.post("/api/certificates")
+def upload_certificates():
+    certificate = read_uploaded_text("client_cert", "client certificate")
+    private_key = read_uploaded_text("client_key", "client key")
+    validate_uploaded_pem_shape(certificate, private_key)
+
+    send_agent_request(build_install_certificates_request(certificate, private_key))
+    rewrite_mapping_configs(load_mappings())
+
+    return jsonify({"status": "uploaded", "certificate": certificate_status()})
+
+
 def parse_json_body() -> dict:
     if not request.is_json:
         raise ApiError("request body must be JSON")
@@ -121,6 +140,34 @@ def parse_json_body() -> dict:
     if not isinstance(payload, dict):
         raise ApiError("request body must be a JSON object")
     return payload
+
+
+def read_uploaded_text(field_name: str, label: str) -> str:
+    uploaded = request.files.get(field_name)
+    if uploaded is None or uploaded.filename == "":
+        raise ApiError(f"{label} file is required")
+
+    data = uploaded.stream.read(MAX_CERT_UPLOAD_BYTES + 1)
+    if len(data) > MAX_CERT_UPLOAD_BYTES:
+        raise ApiError(f"{label} file is too large")
+
+    try:
+        value = data.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ApiError(f"{label} file must be UTF-8 text") from exc
+
+    if not value:
+        raise ApiError(f"{label} file is required")
+    return value
+
+
+def validate_uploaded_pem_shape(certificate: str, private_key: str) -> None:
+    if "-----BEGIN CERTIFICATE-----" not in certificate:
+        raise ApiError("client certificate must be PEM encoded")
+    if "-----BEGIN " not in private_key or "PRIVATE KEY-----" not in private_key:
+        raise ApiError("client key must be PEM encoded")
+    if "-----BEGIN ENCRYPTED PRIVATE KEY-----" in private_key:
+        raise ApiError("encrypted private keys are not supported")
 
 
 def load_mappings(data_path: Path | str | None = None) -> list[dict]:
@@ -209,6 +256,32 @@ def mapping_to_dict(mapping: nginx_manager.Mapping) -> dict:
     }
 
 
+def build_install_certificates_request(certificate: str, private_key: str) -> str:
+    cert_payload = base64.b64encode(certificate.encode("utf-8")).decode("ascii")
+    key_payload = base64.b64encode(private_key.encode("utf-8")).decode("ascii")
+    return f"INSTALL_CERTS\nCERT {cert_payload}\nKEY {key_payload}\nEND\n"
+
+
+def rewrite_mapping_configs(mappings: list[dict]) -> None:
+    for mapping in mappings:
+        content = nginx_manager.generate_server_block(mapping)
+        send_agent_request(f"WRITE {mapping['port']}\n{content}END\n")
+
+
+def certificate_status() -> dict:
+    uploaded = nginx_manager.UPLOADED_CERT_PATH.exists() and nginx_manager.UPLOADED_KEY_PATH.exists()
+    fallback = nginx_manager.CERT_PATH.exists() and nginx_manager.KEY_PATH.exists()
+    cert_path, key_path = nginx_manager.active_client_cert_paths()
+    source = "uploaded" if uploaded else "mounted" if fallback else "missing"
+    return {
+        "source": source,
+        "uploaded": uploaded,
+        "mounted": fallback,
+        "active_cert_path": str(cert_path),
+        "active_key_path": str(key_path),
+    }
+
+
 def send_agent_request(message: str, socket_path: Path | str | None = None) -> None:
     socket_path = Path(socket_path or SOCKET_PATH)
     try:
@@ -230,13 +303,14 @@ def send_agent_request(message: str, socket_path: Path | str | None = None) -> N
 
 def ping_remote(remote_url: str) -> dict:
     context = ssl.create_default_context()
+    cert_path, key_path = nginx_manager.active_client_cert_paths()
     try:
-        context.load_cert_chain(str(nginx_manager.CERT_PATH), str(nginx_manager.KEY_PATH))
+        context.load_cert_chain(str(cert_path), str(key_path))
         request_context = Request(remote_url, method="GET")
         with urlopen(request_context, timeout=PING_TIMEOUT_SECONDS, context=context) as response:
             return {"status": "ok", "reachable": True, "code": response.status}
     except HTTPError as exc:
-        return {"status": "error", "reachable": False, "code": exc.code, "error": str(exc)}
+        return {"status": "http_error", "reachable": True, "code": exc.code, "error": str(exc)}
     except (OSError, URLError, ssl.SSLError) as exc:
         return {"status": "error", "reachable": False, "error": str(exc)}
 

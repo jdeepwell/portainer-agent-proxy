@@ -1,3 +1,4 @@
+import base64
 import socket
 import tempfile
 import threading
@@ -30,6 +31,22 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(9102, request.port)
         self.assertEqual("", request.content)
 
+    def test_parse_install_certs_request(self):
+        cert = "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----"
+        key = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
+        request = agent.parse_request(
+            [
+                "INSTALL_CERTS",
+                f"CERT {base64.b64encode(cert.encode()).decode()}",
+                f"KEY {base64.b64encode(key.encode()).decode()}",
+            ]
+        )
+
+        self.assertEqual("INSTALL_CERTS", request.action)
+        self.assertIsNone(request.port)
+        self.assertEqual(cert, request.content)
+        self.assertEqual(key, request.private_key)
+
     def test_parse_rejects_malformed_request(self):
         invalid_requests = [
             [],
@@ -37,6 +54,7 @@ class AgentTests(unittest.TestCase):
             ["WRITE 9200", "server { listen 9200; }"],
             ["DELETE 9101", "unexpected"],
             ["UNKNOWN 9101"],
+            ["INSTALL_CERTS", "CERT not-base64"],
         ]
 
         for lines in invalid_requests:
@@ -63,6 +81,14 @@ class AgentTests(unittest.TestCase):
 
         delete_mock.assert_called_once_with(9104)
         reload_mock.assert_called_once_with()
+
+    @patch("app.agent.nginx_manager.install_client_certificates")
+    def test_execute_install_certs_request_installs_without_reload(self, install_mock):
+        request = agent.AgentRequest("INSTALL_CERTS", content="cert", private_key="key")
+
+        agent.execute_request(request)
+
+        install_mock.assert_called_once_with("cert", "key")
 
     @patch("app.agent.nginx_manager.reload_nginx")
     @patch("app.agent.nginx_manager.write_config_content")

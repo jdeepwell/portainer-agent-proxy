@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import grp
+import base64
 import os
 import signal
 import socket
@@ -32,8 +33,9 @@ class AgentRequest:
     """A parsed privileged agent request."""
 
     action: str
-    port: int
+    port: int | None = None
     content: str = ""
+    private_key: str = ""
 
 
 def parse_request(lines: list[str]) -> AgentRequest:
@@ -44,10 +46,20 @@ def parse_request(lines: list[str]) -> AgentRequest:
 
     command, *payload = lines
     parts = command.split()
-    if len(parts) != 2:
-        raise AgentProtocolError("first line must be WRITE <port> or DELETE <port>")
+    if not parts:
+        raise AgentProtocolError("empty command")
 
     action = parts[0].upper()
+
+    if action == "INSTALL_CERTS":
+        if len(parts) != 1:
+            raise AgentProtocolError("INSTALL_CERTS does not accept command arguments")
+        certificate, private_key = parse_certificate_payload(payload)
+        return AgentRequest(action="INSTALL_CERTS", content=certificate, private_key=private_key)
+
+    if len(parts) != 2:
+        raise AgentProtocolError("first line must be WRITE <port>, DELETE <port>, or INSTALL_CERTS")
+
     port = nginx_manager.validate_port(parts[1])
 
     if action == "DELETE":
@@ -68,16 +80,53 @@ def execute_request(request: AgentRequest) -> None:
     """Run a parsed request through the nginx manager."""
 
     if request.action == "WRITE":
+        if request.port is None:
+            raise AgentProtocolError("WRITE requires a port")
         nginx_manager.write_config_content(request.port, request.content)
         nginx_manager.reload_nginx()
         return
 
     if request.action == "DELETE":
+        if request.port is None:
+            raise AgentProtocolError("DELETE requires a port")
         nginx_manager.delete_mapping_config(request.port)
         nginx_manager.reload_nginx()
         return
 
+    if request.action == "INSTALL_CERTS":
+        nginx_manager.install_client_certificates(request.content, request.private_key)
+        return
+
     raise AgentProtocolError("unknown command")
+
+
+def parse_certificate_payload(lines: list[str]) -> tuple[str, str]:
+    """Parse base64-encoded certificate upload payload lines."""
+
+    values: dict[str, str] = {}
+    for line in lines:
+        if not line.strip():
+            continue
+        key, separator, value = line.partition(" ")
+        if not separator:
+            raise AgentProtocolError("certificate payload lines must be CERT <base64> or KEY <base64>")
+        key = key.upper()
+        if key not in {"CERT", "KEY"}:
+            raise AgentProtocolError("certificate payload lines must be CERT <base64> or KEY <base64>")
+        if key in values:
+            raise AgentProtocolError(f"duplicate {key} payload")
+        values[key] = decode_base64_text(value, key.lower())
+
+    if "CERT" not in values or "KEY" not in values:
+        raise AgentProtocolError("INSTALL_CERTS requires CERT and KEY payloads")
+    return values["CERT"], values["KEY"]
+
+
+def decode_base64_text(value: str, label: str) -> str:
+    try:
+        return base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError, ValueError) as exc:
+        raise AgentProtocolError(f"{label} payload must be base64-encoded utf-8 text") from exc
 
 
 def read_request_lines(connection: socket.socket) -> list[str]:

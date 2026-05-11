@@ -67,12 +67,16 @@ No PHP, no fcgiwrap, no additional runtimes beyond the above.
 │   └── conf.d/                  # Dynamically generated per-mapping server blocks
 │       ├── 9101.conf
 │       └── 9102.conf
-├── certs/                       # Mounted read-only from host
+├── certs/                       # Optional mounted read-only cert fallback from host
 │   ├── client.cert
 │   └── client.key
 ├── data/
-│   └── mappings.json            # Persisted mapping configuration
+│   ├── mappings.json            # Persisted mapping configuration
+│   └── certs/                   # Persisted UI-uploaded client certificate and key
+│       ├── client.cert
+│       └── client.key
 ├── etc/
+│   ├── entrypoint.sh            # Runtime directory/ownership preparation, then starts supervisord
 │   └── supervisord.conf         # Supervisor process definitions
 ├── .github/
 │   └── workflows/
@@ -90,7 +94,7 @@ No PHP, no fcgiwrap, no additional runtimes beyond the above.
 - Creates `www-data` user for the web app process
 - Copies all application files into the image
 - Creates `/nginx/conf.d/`, `/data/`, `/run/`, and `/certs/` directories as needed
-- Sets `CMD ["supervisord", "-c", "/etc/supervisord.conf"]`
+- Uses `/etc/entrypoint.sh` as the container command. The entrypoint prepares runtime directories, ensures `/data` and `/data/mappings.json` are writable by `www-data` when a fresh Docker volume is mounted, and then starts `supervisord`.
 
 ---
 
@@ -133,6 +137,32 @@ Persists the port-to-remote-URL mappings across container restarts.
 
 ---
 
+## Client Certificate Configuration
+
+The proxy supports one global TLS client identity used for all remote agent mappings.
+
+The preferred managed configuration is uploaded through the management UI and persisted in the `/data` volume:
+
+```
+/data/certs/client.cert
+/data/certs/client.key
+```
+
+The existing mount-based configuration remains supported as a fallback:
+
+```
+/certs/client.cert
+/certs/client.key
+```
+
+If both uploaded files exist under `/data/certs/`, nginx config generation and the ping endpoint use those uploaded files. If either uploaded file is missing, the application falls back to the mounted `/certs/` files.
+
+Uploaded certificates are installed by the privileged root agent, not written directly by the unprivileged Flask web app. The agent validates the certificate and private key as a matching usable pair before replacing the active uploaded files. Certificate writes are atomic. The uploaded certificate file is readable by the nginx process, while the uploaded private key is installed with restrictive permissions suitable for nginx to read it without making it world-readable.
+
+The `/data` directory must be backed by a Docker volume or host bind mount in production. With a persistent `/data` volume, both `mappings.json` and uploaded certificate files survive container recreation and image upgrades. If no persistent `/data` mount is configured, uploaded certificates and mappings are lost when the container is replaced.
+
+---
+
 ## nginx Configuration
 
 ### `/nginx/nginx.conf`
@@ -153,8 +183,10 @@ server {
 
     location / {
         proxy_pass                    <remote_url>;
-        proxy_ssl_certificate         /certs/client.cert;
-        proxy_ssl_certificate_key     /certs/client.key;
+        proxy_ssl_certificate         <active_client_cert_path>;
+        proxy_ssl_certificate_key     <active_client_key_path>;
+        proxy_ssl_server_name         on;
+        proxy_ssl_name                $proxy_host;
 
         # WebSocket support (required for Portainer exec, logs, stats)
         proxy_http_version            1.1;
@@ -168,6 +200,8 @@ server {
 }
 ```
 
+`<active_client_cert_path>` and `<active_client_key_path>` resolve to `/data/certs/client.cert` and `/data/certs/client.key` when both uploaded files exist, otherwise `/certs/client.cert` and `/certs/client.key`. Upstream TLS SNI is enabled so Apache name-based TLS virtual hosts receive the expected server name.
+
 nginx uses the system CA bundle to verify remote server certificates (Let's Encrypt is trusted by default in Alpine). No custom CA configuration is required.
 
 ---
@@ -179,8 +213,10 @@ nginx uses the system CA bundle to verify remote server certificates (Let's Encr
 - Listen on Unix domain socket `/run/nginx-agent.sock`
 - Accept connections exclusively from the `www-data` web app process
 - Receive instructions to add, update, or remove per-mapping nginx config files
+- Receive instructions to install or replace the global uploaded TLS client certificate and key
 - Validate any new or modified nginx config using `nginx -t` before writing to disk
 - Write validated config fragments to `/nginx/conf.d/<port>.conf`
+- Validate uploaded certificate/key pairs before writing them under `/data/certs/`
 - Remove config files for deleted mappings
 - Reload nginx via `nginx -s reload` after any configuration change
 - Return a success or error response to the caller
@@ -206,6 +242,11 @@ Simple line-based text protocol over the Unix socket:
    - A command to remove the config file for a given port (e.g. `DELETE <port>`)
    - Terminated by `END`
 
+3. **Install uploaded certificate/key:**
+   - A command to install the global client certificate and private key
+   - Certificate and key payloads are transferred in a protocol-safe encoded form
+   - Terminated by `END`
+
 **Response from agent to web app:**
 - `OK` on success
 - `ERROR: <message>` on failure (including nginx -t output on validation failure)
@@ -214,6 +255,7 @@ Simple line-based text protocol over the Unix socket:
 - Always run `nginx -t` using a temporary file **before** writing any config to the live conf.d directory
 - Never pass received content directly to a shell command (no shell=True interpolation)
 - Reject any request whose config does not pass `nginx -t` validation
+- Reject uploaded certificate/key pairs that cannot be loaded together as a usable TLS client identity
 - Only process requests arriving via the permission-restricted Unix socket
 
 ---
@@ -222,8 +264,10 @@ Simple line-based text protocol over the Unix socket:
 
 A helper module imported by the agent. Responsibilities:
 - Generate the nginx `server` block content for a given mapping (port + remote_url)
+- Resolve the active client certificate paths, preferring uploaded `/data/certs/` files and falling back to mounted `/certs/` files
 - Determine the correct config file path (`/nginx/conf.d/<port>.conf`)
 - Provide utility functions for writing, deleting, validating (via `nginx -t`), and reloading nginx config
+- Provide utilities for validating and atomically installing uploaded client certificate/key pairs
 
 ---
 
@@ -234,7 +278,9 @@ A helper module imported by the agent. Responsibilities:
 - Serve the management UI and REST API using Flask
 - Listen on port `9200`
 - Read current mappings from `/data/mappings.json`
+- Read active client certificate status
 - On configuration changes, send the appropriate instruction to the agent via the Unix socket
+- On certificate uploads, send the certificate/key pair to the agent via the Unix socket
 - Persist mapping changes to `/data/mappings.json`
 - Display success or error feedback in the UI
 
@@ -247,6 +293,8 @@ A helper module imported by the agent. Responsibilities:
 | `POST` | `/api/mappings` | Add a new mapping |
 | `DELETE` | `/api/mappings/<port>` | Remove a mapping by port |
 | `GET` | `/api/mappings/<port>/ping` | Test connectivity to the remote agent for a given port |
+| `GET` | `/api/certificates/status` | Return active client certificate source and whether uploaded files are present |
+| `POST` | `/api/certificates` | Upload or replace the global client certificate and private key |
 
 ### POST `/api/mappings` Request Body
 ```json
@@ -267,7 +315,16 @@ The web app communicates with the agent by:
 The web app never writes nginx config files directly.
 
 ### Ping Endpoint
-The ping endpoint (`GET /api/mappings/<port>/ping`) tests whether the remote agent at the configured URL is reachable and responding, using a simple HTTPS request with the client certificate. The result is returned inline to the UI.
+The ping endpoint (`GET /api/mappings/<port>/ping`) tests whether the remote agent at the configured URL is reachable and responding, using a simple HTTPS request with the client certificate. HTTP error responses still indicate that TLS/mTLS succeeded and the remote answered, so they are returned as reachable HTTP-status results rather than transport failures. The result is returned inline to the UI.
+
+### Certificate Upload Endpoint
+
+`POST /api/certificates` accepts `multipart/form-data` with:
+
+- `client_cert`: PEM-encoded client certificate file
+- `client_key`: PEM-encoded private key file
+
+The Flask app validates request shape and size, then sends the content to the privileged agent. The agent validates that the certificate/key pair can be loaded together before installing it under `/data/certs/`. After a successful upload, the web app rewrites all existing mapping configs through the agent so nginx starts using the newly uploaded certificate paths.
 
 ---
 
@@ -277,6 +334,8 @@ Single-page interface served at port 9200:
 
 - Table of current mappings with columns: port, name, remote URL, status indicator
 - "Add" form with fields: name (required), remote URL (required), port (optional override)
+- Certificate upload form with fields for the client certificate and private key
+- Certificate status showing whether the active certificate source is uploaded `/data/certs/` files or mounted `/certs/` fallback files
 - Delete button per row — calls `DELETE /api/mappings/<port>`
 - Ping button per row — calls `GET /api/mappings/<port>/ping` and displays result inline
 - Status indicators auto-refresh every 30 seconds
@@ -299,8 +358,8 @@ services:
     ports:
       - "127.0.0.1:9200:9200"    # Management UI — loopback only, not accessible remotely
     volumes:
-      - /path/to/certs:/certs:ro  # TLS client certificate and key, read-only
-      - proxy_data:/data           # Persistent mapping configuration
+      - /path/to/certs:/certs:ro  # Optional fallback TLS client certificate and key, read-only
+      - proxy_data:/data           # Persistent mapping configuration and uploaded certificate/key
     networks:
       - portainer_net
 ```
@@ -334,8 +393,8 @@ Agent proxy ports (91xx) are **not** declared under `ports:` — they are only r
 - **Socket access**: The agent Unix socket is `chmod 660`, owned `root:www-data`. Only the `www-data` web app process can connect. No other process can issue privileged commands.
 - **Config validation**: All nginx configuration changes are validated with `nginx -t` using a temporary file before being written to the live configuration directory.
 - **No shell injection**: Received config content is never interpolated into shell commands. Subprocess calls use argument lists, not shell strings.
-- **Least privilege**: The web app runs as `www-data` with no write access to nginx config files or certificate files.
-- **Certificates**: The client certificate and key are mounted read-only into `/certs/`. The proxy never modifies them.
+- **Least privilege**: The web app runs as `www-data` with no write access to nginx config files or certificate files. It is a member of the `nginx` group so the ping endpoint can read the root-installed uploaded private key.
+- **Certificates**: The client certificate and key can be mounted read-only into `/certs/` or uploaded through the UI into `/data/certs/`. Uploaded files are installed by the privileged agent after validation. The private key is not logged and is installed with restrictive permissions.
 - **Network exposure**: Agent proxy ports are not exposed to the host. Only the management UI port is exposed, bound exclusively to `127.0.0.1`.
 - **No UI authentication**: The management UI has no login. Security relies on the loopback-only binding — it is not accessible from outside the host.
 - **TLS verification**: nginx verifies remote server certificates using the Alpine system CA bundle. Let's Encrypt certificates are trusted by default. No custom CA configuration is needed.

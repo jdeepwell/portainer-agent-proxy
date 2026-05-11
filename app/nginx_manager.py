@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import grp
 import shutil
+import ssl
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -14,7 +16,11 @@ from urllib.parse import urlparse, urlunparse
 CONF_DIR = Path("/nginx/conf.d")
 CERT_PATH = Path("/certs/client.cert")
 KEY_PATH = Path("/certs/client.key")
+DATA_CERT_DIR = Path("/data/certs")
+UPLOADED_CERT_PATH = DATA_CERT_DIR / "client.cert"
+UPLOADED_KEY_PATH = DATA_CERT_DIR / "client.key"
 NGINX_BIN = "/usr/sbin/nginx"
+NGINX_GROUP = "nginx"
 PORT_MIN = 9101
 PORT_MAX = 9199
 
@@ -33,6 +39,10 @@ class NginxValidationError(NginxManagerError, RuntimeError):
 
 class NginxReloadError(NginxManagerError, RuntimeError):
     """Raised when nginx cannot be reloaded."""
+
+
+class CertificateValidationError(NginxManagerError, ValueError):
+    """Raised when an uploaded certificate/key pair is invalid."""
 
 
 @dataclass(frozen=True)
@@ -131,17 +141,45 @@ def config_path(port: int | str, conf_dir: Path | str = CONF_DIR) -> Path:
     return Path(conf_dir) / f"{safe_port}.conf"
 
 
-def generate_server_block(mapping: Mapping | dict) -> str:
+def active_client_cert_paths(
+    *,
+    uploaded_cert_path: Path | str | None = None,
+    uploaded_key_path: Path | str | None = None,
+    fallback_cert_path: Path | str | None = None,
+    fallback_key_path: Path | str | None = None,
+) -> tuple[Path, Path]:
+    """Return uploaded certificate paths when complete, otherwise mounted fallback paths."""
+
+    uploaded_cert = Path(uploaded_cert_path or UPLOADED_CERT_PATH)
+    uploaded_key = Path(uploaded_key_path or UPLOADED_KEY_PATH)
+    if uploaded_cert.exists() and uploaded_key.exists():
+        return uploaded_cert, uploaded_key
+    return Path(fallback_cert_path or CERT_PATH), Path(fallback_key_path or KEY_PATH)
+
+
+def generate_server_block(
+    mapping: Mapping | dict,
+    *,
+    cert_path: Path | str | None = None,
+    key_path: Path | str | None = None,
+) -> str:
     """Generate a deterministic nginx server block for a mapping."""
 
     normalized = normalize_mapping(mapping)
+    if cert_path is None or key_path is None:
+        active_cert_path, active_key_path = active_client_cert_paths()
+        cert_path = active_cert_path if cert_path is None else cert_path
+        key_path = active_key_path if key_path is None else key_path
+
     return f"""server {{
     listen {normalized.port};
 
     location / {{
         proxy_pass                    {normalized.remote_url};
-        proxy_ssl_certificate         {CERT_PATH};
-        proxy_ssl_certificate_key     {KEY_PATH};
+        proxy_ssl_certificate         {Path(cert_path)};
+        proxy_ssl_certificate_key     {Path(key_path)};
+        proxy_ssl_server_name         on;
+        proxy_ssl_name                $proxy_host;
 
         proxy_http_version            1.1;
         proxy_set_header              Upgrade    $http_upgrade;
@@ -283,6 +321,59 @@ def delete_mapping_config(
     return target
 
 
+def validate_certificate_pair(certificate: str, private_key: str) -> None:
+    """Validate that uploaded PEM content can be loaded as a client cert/key pair."""
+
+    certificate = _normalize_pem_content(certificate, "certificate")
+    private_key = _normalize_pem_content(private_key, "private key")
+
+    if "-----BEGIN CERTIFICATE-----" not in certificate:
+        raise CertificateValidationError("client certificate must be PEM encoded")
+    if "-----BEGIN " not in private_key or "PRIVATE KEY-----" not in private_key:
+        raise CertificateValidationError("client key must be PEM encoded")
+    if "-----BEGIN ENCRYPTED PRIVATE KEY-----" in private_key:
+        raise CertificateValidationError("encrypted private keys are not supported")
+
+    with tempfile.TemporaryDirectory(prefix="client-cert-") as temp_dir:
+        temp_path = Path(temp_dir)
+        cert_file = temp_path / "client.cert"
+        key_file = temp_path / "client.key"
+        cert_file.write_text(certificate, encoding="utf-8")
+        key_file.write_text(private_key, encoding="utf-8")
+        try:
+            ssl.create_default_context().load_cert_chain(str(cert_file), str(key_file))
+        except (OSError, ssl.SSLError) as exc:
+            raise CertificateValidationError(f"certificate/key pair is invalid: {exc}") from exc
+
+
+def install_client_certificates(
+    certificate: str,
+    private_key: str,
+    *,
+    cert_path: Path | str = UPLOADED_CERT_PATH,
+    key_path: Path | str = UPLOADED_KEY_PATH,
+    nginx_group: str = NGINX_GROUP,
+) -> tuple[Path, Path]:
+    """Validate and atomically install uploaded client certificate files."""
+
+    certificate = _normalize_pem_content(certificate, "certificate")
+    private_key = _normalize_pem_content(private_key, "private key")
+    validate_certificate_pair(certificate, private_key)
+
+    cert_target = Path(cert_path)
+    key_target = Path(key_path)
+    if cert_target.parent != key_target.parent:
+        raise CertificateValidationError("certificate and key must share a directory")
+
+    cert_target.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(cert_target.parent, 0o755)
+
+    group_id = _group_id(nginx_group)
+    _atomic_write_sensitive_file(cert_target, certificate, mode=0o644, group_id=group_id)
+    _atomic_write_sensitive_file(key_target, private_key, mode=0o640, group_id=group_id)
+    return cert_target, key_target
+
+
 def reload_nginx(*, nginx_bin: str = NGINX_BIN) -> None:
     """Reload nginx after a successful configuration change."""
 
@@ -309,6 +400,42 @@ def _copy_existing_configs(source_dir: Path, target_dir: Path, exclude_ports: se
         if source_port in exclude_ports:
             continue
         shutil.copy2(source, target_dir / source.name)
+
+
+def _normalize_pem_content(content: str, label: str) -> str:
+    if not isinstance(content, str):
+        raise CertificateValidationError(f"{label} must be text")
+    value = content.strip()
+    if not value:
+        raise CertificateValidationError(f"{label} is required")
+    return f"{value}\n"
+
+
+def _group_id(group_name: str) -> int:
+    try:
+        return grp.getgrnam(group_name).gr_gid
+    except KeyError:
+        return -1
+
+
+def _atomic_write_sensitive_file(target: Path, content: str, *, mode: int, group_id: int) -> None:
+    fd, temp_name = tempfile.mkstemp(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(temp_name, 0, group_id)
+        os.chmod(temp_name, mode)
+        os.replace(temp_name, target)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
 
 
 def _test_nginx_config(conf_dir: Path, temp_root: Path) -> str:

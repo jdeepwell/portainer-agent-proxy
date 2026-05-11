@@ -114,11 +114,20 @@
         background: var(--bad);
       }
 
+      .status-pill[data-state="warning"] .dot {
+        background: var(--warn);
+      }
+
       .layout {
         display: grid;
         grid-template-columns: minmax(0, 1fr) 340px;
         gap: 18px;
         align-items: start;
+      }
+
+      .side-stack {
+        display: grid;
+        gap: 18px;
       }
 
       .panel {
@@ -232,6 +241,11 @@
         color: var(--bad);
       }
 
+      .status-pill[data-state="warning"] {
+        background: var(--warn-bg);
+        color: var(--warn);
+      }
+
       .actions {
         display: flex;
         align-items: center;
@@ -315,6 +329,19 @@
         color: var(--good);
       }
 
+      .status-line {
+        display: grid;
+        gap: 4px;
+        padding: 16px 16px 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .status-line strong {
+        color: var(--text);
+      }
+
       @media (max-width: 860px) {
         .app-shell {
           width: min(100vw - 20px, 680px);
@@ -369,27 +396,51 @@
           </div>
         </div>
 
-        <aside class="panel">
-          <div class="panel-header">
-            <h2>Add Mapping</h2>
-          </div>
-          <form id="mapping-form">
-            <label>
-              Name
-              <input id="name" name="name" autocomplete="off" required maxlength="80">
-            </label>
-            <label>
-              Remote URL
-              <input id="remote_url" name="remote_url" type="url" required placeholder="https://agent.example.com">
-            </label>
-            <label>
-              Port
-              <input id="port" name="port" inputmode="numeric" pattern="[0-9]*" placeholder="Auto">
-            </label>
-            <button class="primary" type="submit" id="add-button">Add Mapping</button>
-            <div class="feedback" id="feedback" role="status" aria-live="polite"></div>
-          </form>
-        </aside>
+        <div class="side-stack">
+          <aside class="panel">
+            <div class="panel-header">
+              <h2>Add Mapping</h2>
+            </div>
+            <form id="mapping-form">
+              <label>
+                Name
+                <input id="name" name="name" autocomplete="off" required maxlength="80">
+              </label>
+              <label>
+                Remote URL
+                <input id="remote_url" name="remote_url" type="url" required placeholder="https://agent.example.com">
+              </label>
+              <label>
+                Port
+                <input id="port" name="port" inputmode="numeric" pattern="[0-9]*" placeholder="Auto">
+              </label>
+              <button class="primary" type="submit" id="add-button">Add Mapping</button>
+              <div class="feedback" id="feedback" role="status" aria-live="polite"></div>
+            </form>
+          </aside>
+
+          <aside class="panel">
+            <div class="panel-header">
+              <h2>Client Certificate</h2>
+            </div>
+            <div class="status-line">
+              <span>Source: <strong id="certificate-source">Checking</strong></span>
+              <span id="certificate-path">Waiting for status</span>
+            </div>
+            <form id="certificate-form">
+              <label>
+                Certificate
+                <input id="client_cert" name="client_cert" type="file" accept=".cert,.crt,.pem" required>
+              </label>
+              <label>
+                Private Key
+                <input id="client_key" name="client_key" type="file" accept=".key,.pem" required>
+              </label>
+              <button class="primary" type="submit" id="certificate-button">Upload Certificate</button>
+              <div class="feedback" id="certificate-feedback" role="status" aria-live="polite"></div>
+            </form>
+          </aside>
+        </div>
       </section>
     </main>
 
@@ -443,12 +494,22 @@
         form: document.getElementById("mapping-form"),
         addButton: document.getElementById("add-button"),
         feedback: document.getElementById("feedback"),
+        certificateForm: document.getElementById("certificate-form"),
+        certificateButton: document.getElementById("certificate-button"),
+        certificateFeedback: document.getElementById("certificate-feedback"),
+        certificateSource: document.getElementById("certificate-source"),
+        certificatePath: document.getElementById("certificate-path"),
         rowTemplate: document.getElementById("mapping-row-template")
       };
 
       function setFeedback(message, status) {
         nodes.feedback.textContent = message;
         nodes.feedback.dataset.state = status || "";
+      }
+
+      function setCertificateFeedback(message, status) {
+        nodes.certificateFeedback.textContent = message;
+        nodes.certificateFeedback.dataset.state = status || "";
       }
 
       async function api(path, options) {
@@ -491,6 +552,27 @@
         }
       }
 
+      async function refreshCertificateStatus() {
+        try {
+          const data = await api("/api/certificates/status");
+          nodes.certificateSource.textContent = certificateSourceLabel(data.source);
+          nodes.certificatePath.textContent = data.active_cert_path || "No active certificate path";
+        } catch (error) {
+          nodes.certificateSource.textContent = "Unavailable";
+          nodes.certificatePath.textContent = error.message;
+        }
+      }
+
+      function certificateSourceLabel(source) {
+        if (source === "uploaded") {
+          return "Uploaded";
+        }
+        if (source === "mounted") {
+          return "Mounted fallback";
+        }
+        return "Missing";
+      }
+
       function renderMappings() {
         nodes.mappingBody.innerHTML = "";
         nodes.mappingCount.textContent = pluralize(state.mappings.length, "mapping");
@@ -527,11 +609,19 @@
           text.textContent = "Checking";
           return;
         }
+        if (result.status === "http_error") {
+          pill.dataset.state = "warning";
+          text.textContent = statusLabel(result);
+          return;
+        }
         pill.dataset.state = result.reachable ? "ok" : "error";
         text.textContent = result.reachable ? statusLabel(result) : "Failed";
       }
 
       function statusLabel(result) {
+        if (result.status === "http_error" && result.code) {
+          return `HTTP ${result.code}`;
+        }
         return result.code ? `OK ${result.code}` : "OK";
       }
 
@@ -629,9 +719,33 @@
         }
       });
 
+      nodes.certificateForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setCertificateFeedback("", "");
+        nodes.certificateButton.disabled = true;
+
+        try {
+          const formData = new FormData(nodes.certificateForm);
+          await api("/api/certificates", {
+            method: "POST",
+            body: formData
+          });
+          nodes.certificateForm.reset();
+          setCertificateFeedback("Certificate uploaded", "ok");
+          await refreshCertificateStatus();
+          await refreshMappings({ ping: true });
+        } catch (error) {
+          setCertificateFeedback(error.message, "error");
+        } finally {
+          nodes.certificateButton.disabled = false;
+        }
+      });
+
       refreshHealth();
+      refreshCertificateStatus();
       refreshMappings({ ping: true });
       window.setInterval(refreshHealth, 30000);
+      window.setInterval(refreshCertificateStatus, 30000);
       window.setInterval(() => refreshMappings({ ping: true }), 30000);
     </script>
   </body>

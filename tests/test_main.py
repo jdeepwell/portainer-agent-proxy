@@ -1,3 +1,4 @@
+import io
 import json
 import importlib.util
 import tempfile
@@ -11,17 +12,34 @@ if importlib.util.find_spec("flask") is None:
 from app import main
 
 
+FAKE_CERT = "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----"
+FAKE_KEY = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
+
+
 class MainApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.data_path = Path(self.temp_dir.name) / "mappings.json"
-        self.data_patch = patch.object(main, "DATA_PATH", self.data_path)
-        self.data_patch.start()
+        self.temp_path = Path(self.temp_dir.name)
+        self.data_path = self.temp_path / "mappings.json"
+        self.uploaded_cert_path = self.temp_path / "certs" / "client.cert"
+        self.uploaded_key_path = self.temp_path / "certs" / "client.key"
+        self.mounted_cert_path = self.temp_path / "mounted" / "client.cert"
+        self.mounted_key_path = self.temp_path / "mounted" / "client.key"
+        self.patches = [
+            patch.object(main, "DATA_PATH", self.data_path),
+            patch.object(main.nginx_manager, "UPLOADED_CERT_PATH", self.uploaded_cert_path),
+            patch.object(main.nginx_manager, "UPLOADED_KEY_PATH", self.uploaded_key_path),
+            patch.object(main.nginx_manager, "CERT_PATH", self.mounted_cert_path),
+            patch.object(main.nginx_manager, "KEY_PATH", self.mounted_key_path),
+        ]
+        for active_patch in self.patches:
+            active_patch.start()
         main.app.config.update(TESTING=True)
         self.client = main.app.test_client()
 
     def tearDown(self):
-        self.data_patch.stop()
+        for active_patch in reversed(self.patches):
+            active_patch.stop()
         self.temp_dir.cleanup()
 
     def write_mappings(self, mappings):
@@ -44,7 +62,73 @@ class MainApiTests(unittest.TestCase):
         body = response.get_data(as_text=True)
         self.assertIn("Portainer mTLS Proxy", body)
         self.assertIn('id="mapping-form"', body)
+        self.assertIn('id="certificate-form"', body)
         self.assertIn("/api/mappings", body)
+        self.assertIn("/api/certificates", body)
+
+    def test_certificate_status_reports_uploaded_source(self):
+        self.uploaded_cert_path.parent.mkdir(parents=True)
+        self.uploaded_cert_path.write_text("cert", encoding="utf-8")
+        self.uploaded_key_path.write_text("key", encoding="utf-8")
+
+        response = self.client.get("/api/certificates/status")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "source": "uploaded",
+                "uploaded": True,
+                "mounted": False,
+                "active_cert_path": str(self.uploaded_cert_path),
+                "active_key_path": str(self.uploaded_key_path),
+            },
+            response.get_json(),
+        )
+
+    @patch("app.main.send_agent_request")
+    def test_upload_certificates_sends_install_request(self, send_agent_mock):
+        response = self.client.post(
+            "/api/certificates",
+            data={
+                "client_cert": (io.BytesIO(FAKE_CERT.encode("utf-8")), "client.cert"),
+                "client_key": (io.BytesIO(FAKE_KEY.encode("utf-8")), "client.key"),
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("uploaded", response.get_json()["status"])
+        message = send_agent_mock.call_args.args[0]
+        self.assertTrue(message.startswith("INSTALL_CERTS\nCERT "))
+        self.assertIn("\nKEY ", message)
+        self.assertTrue(message.endswith("END\n"))
+
+    @patch("app.main.send_agent_request")
+    def test_upload_certificates_rewrites_existing_mapping_configs(self, send_agent_mock):
+        self.write_mappings([{"port": 9101, "name": "one", "remote_url": "https://one.example.com"}])
+
+        response = self.client.post(
+            "/api/certificates",
+            data={
+                "client_cert": (io.BytesIO(FAKE_CERT.encode("utf-8")), "client.cert"),
+                "client_key": (io.BytesIO(FAKE_KEY.encode("utf-8")), "client.key"),
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(2, send_agent_mock.call_count)
+        self.assertTrue(send_agent_mock.call_args_list[0].args[0].startswith("INSTALL_CERTS\n"))
+        self.assertTrue(send_agent_mock.call_args_list[1].args[0].startswith("WRITE 9101\nserver {"))
+
+    @patch("app.main.send_agent_request")
+    def test_upload_certificates_rejects_missing_private_key(self, send_agent_mock):
+        response = self.client.post(
+            "/api/certificates",
+            data={"client_cert": (io.BytesIO(FAKE_CERT.encode("utf-8")), "client.cert")},
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual({"error": "client key file is required"}, response.get_json())
+        send_agent_mock.assert_not_called()
 
     @patch("app.main.send_agent_request")
     def test_post_mapping_auto_assigns_port_calls_agent_and_persists(self, send_agent_mock):
@@ -192,8 +276,33 @@ class MainApiTests(unittest.TestCase):
         result = main.ping_remote("https://agent.example.com")
 
         self.assertEqual({"status": "ok", "reachable": True, "code": 204}, result)
-        context.load_cert_chain.assert_called_once_with("/certs/client.cert", "/certs/client.key")
+        context.load_cert_chain.assert_called_once_with(str(self.mounted_cert_path), str(self.mounted_key_path))
         self.assertEqual("https://agent.example.com", urlopen_mock.call_args.args[0].full_url)
+
+    @patch("app.main.urlopen")
+    @patch("app.main.ssl.create_default_context")
+    def test_ping_remote_treats_http_error_as_reachable_response(self, create_context_mock, urlopen_mock):
+        context = Mock()
+        create_context_mock.return_value = context
+        urlopen_mock.side_effect = main.HTTPError(
+            url="https://agent.example.com",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=None,
+        )
+
+        result = main.ping_remote("https://agent.example.com")
+
+        self.assertEqual(
+            {
+                "status": "http_error",
+                "reachable": True,
+                "code": 400,
+                "error": "HTTP Error 400: Bad Request",
+            },
+            result,
+        )
 
 
 class FakeAgentClient:
