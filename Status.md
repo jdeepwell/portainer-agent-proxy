@@ -2,7 +2,7 @@
 
 The repository has been initialized locally and connected to the GitHub repository `jdeepwell/portainer-agent-proxy`. The project now has its container foundation in place: `Dockerfile`, `.dockerignore`, `etc/entrypoint.sh`, `etc/supervisord.conf`, static `nginx/nginx.conf`, the `app/` Python modules, the management UI template, and the tracked `nginx/conf.d/` runtime directory placeholder.
 
-The specification now also requires the finished Docker image to be published through GitHub Container Registry as `ghcr.io/jdeepwell/portainer-agent-proxy`, with the local Portainer Docker Compose stack pulling that image directly.
+The Docker image is published through GitHub Container Registry as `ghcr.io/jdeepwell/portainer-agent-proxy`. Version `v0.1.0` has been tagged and pushed, and the GHCR publishing workflow completed successfully for both `main` and the `v0.1.0` tag. The local Portainer Docker Compose stack can pull the image directly from GHCR.
 
 The foundation image has been smoke-tested locally: the image builds, supervisor starts nginx, the root privileged agent, and the `www-data` Flask webapp, nginx configuration validates, and `/api/health` responds successfully over a loopback-bound host port.
 
@@ -15,6 +15,8 @@ The Flask management API is implemented in `app/main.py`. It serves the manageme
 The management UI is implemented in `app/templates/index.html` as a single-page internal admin surface. It loads mappings from the REST API, shows the current mapping table, provides the add form with optional port override, supports global client certificate/private-key upload, shows whether the active certificate source is uploaded or mounted, supports per-row ping and delete actions, displays inline feedback, tracks API health, and refreshes health, certificate status, and mapping status every 30 seconds. A Flask template test covers the rendered UI shell.
 
 Global client certificate management is implemented. Uploaded certificate/key pairs are validated by the root agent and persisted under `/data/certs/client.cert` and `/data/certs/client.key`; mounted `/certs/client.cert` and `/certs/client.key` remain supported as a fallback. The uploaded private key is installed as `root:nginx` with restrictive permissions, and the web app is a member of the `nginx` group so its ping endpoint can read the key without making it world-readable. Both mappings and uploaded certificates survive container recreation when `/data` is backed by a persistent Docker volume.
+
+Container and deployment integration is implemented. The repository includes `compose.example.yml` for Portainer-side deployment, `README.md` documents GHCR image usage, certificate persistence, and Portainer environment URLs, and `.github/workflows/docker-image.yml` builds, tests, tags, and publishes the image to GHCR on `main`, semantic version tags, pull requests, and manual dispatch.
 
 ## Implementation Plan
 
@@ -74,11 +76,13 @@ Status: complete.
 
 ### 6. Container and deployment integration
 
-Status: pending.
+Status: complete.
 
-- Add a sample Docker Compose snippet or example file showing the Portainer integration, loopback-only UI port binding, cert mount, data volume, and shared Docker network.
-- Add the GitHub Actions workflow that builds and publishes the Docker image to GHCR.
-- Confirm that agent proxy ports are only available inside the Docker network and are not exposed on the host.
+- `compose.example.yml` shows the Portainer integration with loopback-only UI port binding, persistent `/data` volume, optional mounted cert fallback, and an external shared Docker network.
+- `.github/workflows/docker-image.yml` builds the image, runs the test suite inside the image, logs in to GHCR, applies Docker metadata tags, and publishes the image.
+- The workflow publishes `latest` for `main`, semantic version tags such as `v0.1.0` and `0.1.0`, branch tags, and SHA tags.
+- `README.md` documents image usage, Compose setup, certificate persistence, and Portainer environment URLs.
+- Agent proxy ports are not published in the example Compose file and remain available only inside the Docker network.
 
 ### 7. Verification
 
@@ -95,7 +99,9 @@ Status: in progress across implementation steps.
 - The rendered management UI is smoke-tested through Flask and served successfully from a disposable container.
 - Named-volume runtime verification confirms `/data` ownership for `www-data`, uploaded certificate persistence under `/data/certs/`, private-key ownership/mode of `root:nginx:0640`, nginx-user key readability, generated configs using `/data/certs/`, and `nginx -t` success.
 - Live preview testing with the World4You remote confirms uploaded certificates are selected, the ping endpoint can read the uploaded key, upstream TLS reaches the remote, and the Portainer Agent returns the expected signed-request authorization response when reached without Portainer's signature headers.
+- `docker compose -f compose.example.yml config` validates the example Compose file.
+- The GHCR workflow succeeded on `main` and on tag `v0.1.0`.
 
 ## Current Next Step
 
-Implement container and deployment integration.
+Use `ghcr.io/jdeepwell/portainer-agent-proxy:0.1.0` or `ghcr.io/jdeepwell/portainer-agent-proxy:latest` in the local Portainer Docker Compose stack and validate a real Portainer environment connection through `http://portainer_mtls_proxy:9101`.
