@@ -10,6 +10,8 @@ The nginx configuration manager is implemented in `app/nginx_manager.py`. It val
 
 The privileged agent is implemented in `app/agent.py`. It owns `/run/nginx-agent.sock`, restricts access to `root:www-data` with mode `0660`, implements the line-based `WRITE <port>` and `DELETE <port>` protocol terminated by `END`, delegates all config mutations to the nginx manager, reloads nginx only after successful mutations, and returns plain `OK` or `ERROR: <message>` responses. Agent tests cover protocol parsing, write/delete execution, failure handling, socket responses, and socket permission setup.
 
+The Flask management API is implemented in `app/main.py`. It serves the management UI shell and health endpoint, exposes mapping list/add/delete/ping REST routes, persists normalized mappings in `/data/mappings.json`, creates a default empty mapping file when needed, auto-assigns ports from `9101`, delegates nginx writes and deletes to the privileged agent over `/run/nginx-agent.sock`, and only persists changes after successful agent operations. The ping endpoint uses Python's standard HTTPS client with the mounted client certificate and key. API tests cover persistence, automatic port selection, duplicate rejection, agent failure handling, delete behavior, ping responses, socket communication, and client-certificate setup.
+
 ## Implementation Plan
 
 ### 1. Project foundation
@@ -41,13 +43,14 @@ Status: complete.
 
 ### 4. Flask management API
 
-Status: pending.
+Status: complete.
 
-- Implement `app/main.py` as the unprivileged web app running on port `9200`.
-- Add JSON persistence for `/data/mappings.json`, including creation of a default empty structure when missing.
-- Implement the REST routes from the spec: list mappings, add mapping, delete mapping, and ping a mapping.
-- On add/delete, communicate with the agent over the Unix socket and only persist state after the agent operation succeeds.
-- Support automatic port assignment starting at `9101` when the user does not provide a port.
+- `app/main.py` implements the unprivileged web app running on port `9200`.
+- JSON persistence for `/data/mappings.json` is implemented, including creation of a default empty structure when missing.
+- REST routes are implemented for listing mappings, adding mappings, deleting mappings, and pinging a mapping.
+- Add/delete operations communicate with the privileged agent over the Unix socket and persist state only after the agent operation succeeds.
+- Automatic port assignment starts at `9101` when the user does not provide a port.
+- `tests/test_main.py` covers the API behavior and agent-socket integration points.
 
 ### 5. Management UI
 
@@ -74,8 +77,11 @@ Status: in progress across implementation steps.
 - A disposable container run verifies that supervisor starts nginx, the root agent, and the `www-data` Flask app.
 - Runtime verification confirms `/api/health`, agent socket ownership/mode, malformed request handling, `DELETE` handling, `WRITE` handling, generated config creation, and `nginx -t` success after a real agent write.
 - Access checks confirm that the host does not publish agent port `9101`, `www-data` can connect to the socket, and the `nginx` user is denied socket access.
-- Mapping persistence, UI/API flows, and ping behavior remain to be verified once the Flask management API and UI are implemented.
+- API tests run successfully inside the project Docker image where Flask is installed.
+- A disposable container HTTP smoke test verifies health, default mapping-file creation, mapping add through the real Flask app and agent socket, generated nginx config creation, `nginx -t`, mapping deletion, config removal, and persisted JSON cleanup.
+- The local Python test suite passes with the Flask-specific test module skipped when Flask is not installed locally.
+- The management UI flow remains to be verified once the browser interface is implemented.
 
 ## Current Next Step
 
-Implement the Flask management API in `app/main.py`.
+Implement the management UI in `app/templates/index.html`.
