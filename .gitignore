@@ -17,3 +17,7 @@ Icon?
 
 # macOS directory events
 .fseventsd
+
+# Python
+__pycache__/
+*.py[cod]

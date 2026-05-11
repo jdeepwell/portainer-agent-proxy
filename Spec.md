@@ -74,6 +74,9 @@ No PHP, no fcgiwrap, no additional runtimes beyond the above.
 │   └── mappings.json            # Persisted mapping configuration
 ├── etc/
 │   └── supervisord.conf         # Supervisor process definitions
+├── .github/
+│   └── workflows/
+│       └── docker-image.yml     # Builds and publishes the image to GitHub Container Registry
 └── run/
     └── nginx-agent.sock         # Unix domain socket (created at runtime by agent)
 ```
@@ -290,7 +293,7 @@ Add to the existing Portainer `docker-compose.yml`:
 ```yaml
 services:
   portainer_mtls_proxy:
-    image: docker-registry.example.com/portainer-mtls-proxy:latest
+    image: ghcr.io/jdeepwell/portainer-agent-proxy:latest
     container_name: portainer_mtls_proxy
     restart: unless-stopped
     ports:
@@ -343,8 +346,12 @@ Agent proxy ports (91xx) are **not** declared under `ports:` — they are only r
 ## Build & Distribution
 
 - A `Dockerfile` builds the image from `nginx:alpine` with all required packages and application files
-- The image is published to a private container registry (e.g. `docker-registry.example.com/portainer-mtls-proxy:latest`)
-- Versioned tags are recommended for production deployments (e.g. `portainer-mtls-proxy:1.0.0`)
+- The image is published from GitHub Actions to GitHub Container Registry (GHCR) under `ghcr.io/jdeepwell/portainer-agent-proxy`
+- The image must be usable directly from a local Docker Compose stack alongside the local Portainer CE container by referencing `ghcr.io/jdeepwell/portainer-agent-proxy:<tag>` in the Compose `image:` field
+- The `latest` tag tracks the current `main` branch build
+- Versioned tags are recommended for production deployments (e.g. `ghcr.io/jdeepwell/portainer-agent-proxy:1.0.0`)
+- If the GHCR package is public, hosts can pull the image without authentication; if it is private, the host running Docker Compose must authenticate with `docker login ghcr.io` before pulling
+- The GitHub Actions workflow should build the Docker image, tag it as `latest` for `main`, tag semantic version releases when applicable, and push the resulting image to GHCR
 
 ---
 
@@ -358,4 +365,3 @@ Agent proxy ports (91xx) are **not** declared under `ports:` — they are only r
 | `main.py` | Python 3 / Flask | `www-data` | Management UI and REST API |
 | `index.html` | HTML/JS | — | Browser-based management interface |
 | supervisord | supervisor (alpine) | `root` (PID 1) | Process manager for all container processes |
-
