@@ -1,0 +1,20 @@
+services:
+  portainer_mtls_proxy:
+    image: ghcr.io/jdeepwell/portainer-agent-proxy:latest
+    container_name: portainer_mtls_proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - proxy_data:/data
+      # Optional fallback when not using the UI certificate upload:
+      # - /absolute/path/to/certs:/certs:ro
+    networks:
+      - portainer_net
+
+volumes:
+  proxy_data:
+
+networks:
+  portainer_net:
+    external: true
