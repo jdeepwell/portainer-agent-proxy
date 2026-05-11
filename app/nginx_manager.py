@@ -212,19 +212,45 @@ def write_mapping_config(
 
     normalized = normalize_mapping(mapping)
     content = generate_server_block(normalized)
+    return write_config_content(
+        normalized.port,
+        content,
+        conf_dir=conf_dir,
+        nginx_bin=nginx_bin,
+    )
+
+
+def write_config_content(
+    port: int | str,
+    content: str,
+    *,
+    conf_dir: Path | str = CONF_DIR,
+    nginx_bin: str = NGINX_BIN,
+) -> Path:
+    """Validate and atomically write a pre-rendered mapping config file."""
+
+    safe_port = validate_port(port)
+    if not isinstance(content, str):
+        raise MappingValidationError("config content must be a string")
+
+    content = content.strip()
+    if not content:
+        raise MappingValidationError("config content is required")
+    content = f"{content}\n"
+
     validate_config_set(
         conf_dir=conf_dir,
-        candidate_port=normalized.port,
+        candidate_port=safe_port,
         candidate_content=content,
         nginx_bin=nginx_bin,
     )
 
-    target = config_path(normalized.port, conf_dir)
+    target = config_path(safe_port, conf_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     fd, temp_name = tempfile.mkstemp(
         dir=target.parent,
-        prefix=f".{normalized.port}.",
+        prefix=f".{safe_port}.",
         suffix=".tmp",
         text=True,
     )

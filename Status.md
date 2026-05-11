@@ -4,9 +4,11 @@ The repository has been initialized locally and connected to the GitHub reposito
 
 The specification now also requires the finished Docker image to be published through GitHub Container Registry as `ghcr.io/jdeepwell/portainer-agent-proxy`, with the local Portainer Docker Compose stack pulling that image directly.
 
-The foundation image has been smoke-tested locally: the image builds, supervisor starts nginx, the root agent skeleton, and the `www-data` Flask webapp, nginx configuration validates, and `/api/health` responds successfully over a loopback-bound host port.
+The foundation image has been smoke-tested locally: the image builds, supervisor starts nginx, the root privileged agent, and the `www-data` Flask webapp, nginx configuration validates, and `/api/health` responds successfully over a loopback-bound host port.
 
-The nginx configuration manager is implemented in `app/nginx_manager.py`. It validates mapping inputs, generates deterministic per-port nginx server blocks, validates candidate config sets with `nginx -t` before writing live files, performs atomic writes, supports validated deletes, and reloads nginx with shell-free subprocess calls. Focused unit tests cover mapping validation, config generation, write/delete behavior, failed validation behavior, and reload command execution.
+The nginx configuration manager is implemented in `app/nginx_manager.py`. It validates mapping inputs, generates deterministic per-port nginx server blocks, validates candidate config sets with `nginx -t` before writing live files, performs atomic writes for generated or pre-rendered config content, supports validated deletes, and reloads nginx with shell-free subprocess calls. Focused unit tests cover mapping validation, config generation, write/delete behavior, failed validation behavior, and reload command execution.
+
+The privileged agent is implemented in `app/agent.py`. It owns `/run/nginx-agent.sock`, restricts access to `root:www-data` with mode `0660`, implements the line-based `WRITE <port>` and `DELETE <port>` protocol terminated by `END`, delegates all config mutations to the nginx manager, reloads nginx only after successful mutations, and returns plain `OK` or `ERROR: <message>` responses. Agent tests cover protocol parsing, write/delete execution, failure handling, socket responses, and socket permission setup.
 
 ## Implementation Plan
 
@@ -29,12 +31,13 @@ Status: complete.
 
 ### 3. Privileged agent
 
-Status: next.
+Status: complete.
 
-- Implement `app/agent.py` as the root process that owns `/run/nginx-agent.sock`.
-- Set socket permissions to `0660` and ownership to `root:www-data`.
-- Implement the line-based protocol for writing and deleting per-port nginx config fragments.
-- Return `OK` on success and `ERROR: <message>` with useful validation/reload output on failure.
+- `app/agent.py` runs as the root process that owns `/run/nginx-agent.sock`.
+- The socket is permissioned as `0660` and owned by `root:www-data`.
+- The agent implements the line-based protocol for writing and deleting per-port nginx config fragments.
+- It returns `OK` on success and `ERROR: <message>` with useful validation/reload output on failure.
+- `tests/test_agent.py` covers protocol parsing, execution, error handling, socket responses, and permission setup.
 
 ### 4. Flask management API
 
@@ -66,11 +69,13 @@ Status: pending.
 
 Status: in progress across implementation steps.
 
-- Add focused tests where practical for mapping validation, nginx config generation, persistence behavior, and socket protocol handling.
-- Build the Docker image locally.
-- Run the container with mounted test certificates/data and verify that all three supervised processes start.
-- Verify nginx config generation, `nginx -t` validation failure behavior, reload behavior, mapping persistence, UI/API flows, and ping behavior.
+- Focused tests cover mapping validation, nginx config generation, config writes/deletes, reload command execution, and agent socket protocol handling.
+- The Docker image builds locally.
+- A disposable container run verifies that supervisor starts nginx, the root agent, and the `www-data` Flask app.
+- Runtime verification confirms `/api/health`, agent socket ownership/mode, malformed request handling, `DELETE` handling, `WRITE` handling, generated config creation, and `nginx -t` success after a real agent write.
+- Access checks confirm that the host does not publish agent port `9101`, `www-data` can connect to the socket, and the `nginx` user is denied socket access.
+- Mapping persistence, UI/API flows, and ping behavior remain to be verified once the Flask management API and UI are implemented.
 
 ## Current Next Step
 
-Implement the privileged agent in `app/agent.py`.
+Implement the Flask management API in `app/main.py`.
