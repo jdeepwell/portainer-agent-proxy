@@ -37,6 +37,15 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual({"mappings": []}, response.get_json())
         self.assertEqual([], self.read_mappings())
 
+    def test_index_serves_management_ui(self):
+        response = self.client.get("/")
+
+        self.assertEqual(200, response.status_code)
+        body = response.get_data(as_text=True)
+        self.assertIn("Portainer mTLS Proxy", body)
+        self.assertIn('id="mapping-form"', body)
+        self.assertIn("/api/mappings", body)
+
     @patch("app.main.send_agent_request")
     def test_post_mapping_auto_assigns_port_calls_agent_and_persists(self, send_agent_mock):
         response = self.client.post(

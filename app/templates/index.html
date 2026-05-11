@@ -4,11 +4,635 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Portainer mTLS Proxy</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7fa;
+        --panel: #ffffff;
+        --panel-soft: #eef3f8;
+        --text: #17202a;
+        --muted: #617080;
+        --line: #d8e0e8;
+        --focus: #2457c5;
+        --good: #16824a;
+        --warn: #9b6a05;
+        --bad: #b42318;
+        --bad-bg: #fff0ed;
+        --good-bg: #eaf7ef;
+        --warn-bg: #fff6db;
+        --shadow: 0 8px 24px rgba(26, 38, 52, 0.08);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      button {
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 650;
+        transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+      }
+
+      button:hover:not(:disabled) {
+        border-color: var(--focus);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.64;
+      }
+
+      .app-shell {
+        width: min(1180px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 28px 0 36px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 22px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 24px;
+        line-height: 1.16;
+        font-weight: 760;
+        letter-spacing: 0;
+      }
+
+      .health {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: var(--warn);
+      }
+
+      .health[data-state="ok"] .dot,
+      .status-pill[data-state="ok"] .dot {
+        background: var(--good);
+      }
+
+      .health[data-state="error"] .dot,
+      .status-pill[data-state="error"] .dot {
+        background: var(--bad);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 340px;
+        gap: 18px;
+        align-items: start;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 58px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-soft);
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.2;
+        font-weight: 760;
+        letter-spacing: 0;
+      }
+
+      .count {
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        min-width: 760px;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 13px 16px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: middle;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 760;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        background: #fbfcfe;
+      }
+
+      td {
+        font-size: 14px;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .port {
+        font-variant-numeric: tabular-nums;
+        font-weight: 750;
+      }
+
+      .url {
+        max-width: 360px;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+
+      .empty {
+        padding: 34px 16px;
+        color: var(--muted);
+        text-align: center;
+        border-top: 0;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        max-width: 210px;
+        min-height: 30px;
+        padding: 0 10px;
+        border-radius: 999px;
+        background: var(--warn-bg);
+        color: var(--warn);
+        font-size: 12px;
+        font-weight: 760;
+        white-space: nowrap;
+      }
+
+      .status-pill[data-state="ok"] {
+        background: var(--good-bg);
+        color: var(--good);
+      }
+
+      .status-pill[data-state="error"] {
+        background: var(--bad-bg);
+        color: var(--bad);
+      }
+
+      .actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        min-width: 150px;
+      }
+
+      .icon-button {
+        width: 38px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+      }
+
+      .icon-button svg {
+        width: 18px;
+        height: 18px;
+        stroke: currentColor;
+        stroke-width: 2;
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .icon-button.danger {
+        color: var(--bad);
+      }
+
+      form {
+        display: grid;
+        gap: 14px;
+        padding: 16px;
+      }
+
+      label {
+        display: grid;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 730;
+      }
+
+      input {
+        width: 100%;
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 8px 10px;
+        background: #ffffff;
+        color: var(--text);
+      }
+
+      input:focus,
+      button:focus-visible {
+        outline: 2px solid rgba(36, 87, 197, 0.28);
+        outline-offset: 2px;
+        border-color: var(--focus);
+      }
+
+      .primary {
+        width: 100%;
+        min-height: 42px;
+        border-color: var(--focus);
+        background: var(--focus);
+        color: #ffffff;
+      }
+
+      .feedback {
+        min-height: 20px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .feedback[data-state="error"] {
+        color: var(--bad);
+      }
+
+      .feedback[data-state="ok"] {
+        color: var(--good);
+      }
+
+      @media (max-width: 860px) {
+        .app-shell {
+          width: min(100vw - 20px, 680px);
+          padding-top: 16px;
+        }
+
+        .topbar,
+        .layout {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+
+        .health {
+          justify-self: start;
+        }
+      }
+    </style>
   </head>
   <body>
-    <main>
-      <h1>Portainer mTLS Proxy</h1>
-      <p>Management UI foundation is ready.</p>
+    <main class="app-shell">
+      <header class="topbar">
+        <h1>Portainer mTLS Proxy</h1>
+        <div class="health" id="health" data-state="checking">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="health-text">Checking</span>
+        </div>
+      </header>
+
+      <section class="layout">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Mappings</h2>
+            <span class="count" id="mapping-count">0 mappings</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Port</th>
+                  <th scope="col">Name</th>
+                  <th scope="col">Remote URL</th>
+                  <th scope="col">Status</th>
+                  <th scope="col"></th>
+                </tr>
+              </thead>
+              <tbody id="mapping-body">
+                <tr>
+                  <td class="empty" colspan="5">Loading</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside class="panel">
+          <div class="panel-header">
+            <h2>Add Mapping</h2>
+          </div>
+          <form id="mapping-form">
+            <label>
+              Name
+              <input id="name" name="name" autocomplete="off" required maxlength="80">
+            </label>
+            <label>
+              Remote URL
+              <input id="remote_url" name="remote_url" type="url" required placeholder="https://agent.example.com">
+            </label>
+            <label>
+              Port
+              <input id="port" name="port" inputmode="numeric" pattern="[0-9]*" placeholder="Auto">
+            </label>
+            <button class="primary" type="submit" id="add-button">Add Mapping</button>
+            <div class="feedback" id="feedback" role="status" aria-live="polite"></div>
+          </form>
+        </aside>
+      </section>
     </main>
+
+    <template id="mapping-row-template">
+      <tr>
+        <td class="port" data-cell="port"></td>
+        <td data-cell="name"></td>
+        <td class="url" data-cell="remote_url"></td>
+        <td>
+          <span class="status-pill" data-cell="status" data-state="checking">
+            <span class="dot" aria-hidden="true"></span>
+            <span data-cell="status_text">Checking</span>
+          </span>
+        </td>
+        <td>
+          <div class="actions">
+            <button class="icon-button" type="button" data-action="ping" title="Ping" aria-label="Ping">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M22 12h-4"></path>
+                <path d="M6 12H2"></path>
+                <path d="m15 5 3 7-3 7"></path>
+                <path d="m9 5-3 7 3 7"></path>
+              </svg>
+            </button>
+            <button class="icon-button danger" type="button" data-action="delete" title="Delete" aria-label="Delete">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 6h18"></path>
+                <path d="M8 6V4h8v2"></path>
+                <path d="M19 6 18 20H6L5 6"></path>
+                <path d="M10 11v5"></path>
+                <path d="M14 11v5"></path>
+              </svg>
+            </button>
+          </div>
+        </td>
+      </tr>
+    </template>
+
+    <script>
+      const state = {
+        mappings: [],
+        pings: new Map(),
+        busyPorts: new Set()
+      };
+
+      const nodes = {
+        health: document.getElementById("health"),
+        healthText: document.getElementById("health-text"),
+        mappingBody: document.getElementById("mapping-body"),
+        mappingCount: document.getElementById("mapping-count"),
+        form: document.getElementById("mapping-form"),
+        addButton: document.getElementById("add-button"),
+        feedback: document.getElementById("feedback"),
+        rowTemplate: document.getElementById("mapping-row-template")
+      };
+
+      function setFeedback(message, status) {
+        nodes.feedback.textContent = message;
+        nodes.feedback.dataset.state = status || "";
+      }
+
+      async function api(path, options) {
+        const response = await fetch(path, options);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || "Request failed");
+        }
+        return data;
+      }
+
+      async function refreshHealth() {
+        try {
+          await api("/api/health");
+          nodes.health.dataset.state = "ok";
+          nodes.healthText.textContent = "Online";
+        } catch (error) {
+          nodes.health.dataset.state = "error";
+          nodes.healthText.textContent = "Offline";
+        }
+      }
+
+      async function refreshMappings(options) {
+        try {
+          const data = await api("/api/mappings");
+          state.mappings = data.mappings || [];
+          renderMappings();
+          if (!options || options.ping !== false) {
+            pingAll();
+          }
+        } catch (error) {
+          nodes.mappingBody.innerHTML = "";
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.className = "empty";
+          cell.colSpan = 5;
+          cell.textContent = error.message;
+          row.appendChild(cell);
+          nodes.mappingBody.appendChild(row);
+        }
+      }
+
+      function renderMappings() {
+        nodes.mappingBody.innerHTML = "";
+        nodes.mappingCount.textContent = pluralize(state.mappings.length, "mapping");
+
+        if (state.mappings.length === 0) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.className = "empty";
+          cell.colSpan = 5;
+          cell.textContent = "No mappings";
+          row.appendChild(cell);
+          nodes.mappingBody.appendChild(row);
+          return;
+        }
+
+        state.mappings.forEach((mapping) => {
+          const row = nodes.rowTemplate.content.firstElementChild.cloneNode(true);
+          row.dataset.port = mapping.port;
+          row.querySelector('[data-cell="port"]').textContent = mapping.port;
+          row.querySelector('[data-cell="name"]').textContent = mapping.name;
+          row.querySelector('[data-cell="remote_url"]').textContent = mapping.remote_url;
+          applyPingState(row, state.pings.get(mapping.port));
+          row.querySelector('[data-action="ping"]').addEventListener("click", () => pingMapping(mapping.port));
+          row.querySelector('[data-action="delete"]').addEventListener("click", () => deleteMapping(mapping.port));
+          nodes.mappingBody.appendChild(row);
+        });
+      }
+
+      function applyPingState(row, result) {
+        const pill = row.querySelector('[data-cell="status"]');
+        const text = row.querySelector('[data-cell="status_text"]');
+        if (!result) {
+          pill.dataset.state = "checking";
+          text.textContent = "Checking";
+          return;
+        }
+        pill.dataset.state = result.reachable ? "ok" : "error";
+        text.textContent = result.reachable ? statusLabel(result) : "Failed";
+      }
+
+      function statusLabel(result) {
+        return result.code ? `OK ${result.code}` : "OK";
+      }
+
+      function pluralize(count, noun) {
+        return `${count} ${noun}${count === 1 ? "" : "s"}`;
+      }
+
+      function setRowBusy(port, busy) {
+        const row = nodes.mappingBody.querySelector(`tr[data-port="${port}"]`);
+        if (!row) {
+          return;
+        }
+        row.querySelectorAll("button").forEach((button) => {
+          button.disabled = busy;
+        });
+      }
+
+      async function pingMapping(port) {
+        if (state.busyPorts.has(port)) {
+          return;
+        }
+        state.busyPorts.add(port);
+        setRowBusy(port, true);
+        try {
+          const result = await api(`/api/mappings/${port}/ping`);
+          state.pings.set(port, result);
+          const row = nodes.mappingBody.querySelector(`tr[data-port="${port}"]`);
+          if (row) {
+            applyPingState(row, result);
+          }
+        } catch (error) {
+          state.pings.set(port, { reachable: false, error: error.message });
+          const row = nodes.mappingBody.querySelector(`tr[data-port="${port}"]`);
+          if (row) {
+            applyPingState(row, state.pings.get(port));
+          }
+        } finally {
+          state.busyPorts.delete(port);
+          setRowBusy(port, false);
+        }
+      }
+
+      async function pingAll() {
+        await Promise.all(state.mappings.map((mapping) => pingMapping(mapping.port)));
+      }
+
+      async function deleteMapping(port) {
+        if (state.busyPorts.has(port)) {
+          return;
+        }
+        state.busyPorts.add(port);
+        setRowBusy(port, true);
+        setFeedback("", "");
+        try {
+          await api(`/api/mappings/${port}`, { method: "DELETE" });
+          state.pings.delete(port);
+          await refreshMappings({ ping: false });
+          setFeedback(`Deleted ${port}`, "ok");
+        } catch (error) {
+          setFeedback(error.message, "error");
+          setRowBusy(port, false);
+        } finally {
+          state.busyPorts.delete(port);
+        }
+      }
+
+      nodes.form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setFeedback("", "");
+        nodes.addButton.disabled = true;
+
+        const formData = new FormData(nodes.form);
+        const payload = {
+          name: String(formData.get("name") || "").trim(),
+          remote_url: String(formData.get("remote_url") || "").trim()
+        };
+        const port = String(formData.get("port") || "").trim();
+        if (port) {
+          payload.port = Number(port);
+        }
+
+        try {
+          const data = await api("/api/mappings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          nodes.form.reset();
+          setFeedback(`Added ${data.mapping.port}`, "ok");
+          await refreshMappings({ ping: true });
+        } catch (error) {
+          setFeedback(error.message, "error");
+        } finally {
+          nodes.addButton.disabled = false;
+        }
+      });
+
+      refreshHealth();
+      refreshMappings({ ping: true });
+      window.setInterval(refreshHealth, 30000);
+      window.setInterval(() => refreshMappings({ ping: true }), 30000);
+    </script>
   </body>
 </html>

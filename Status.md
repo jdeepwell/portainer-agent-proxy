@@ -12,6 +12,8 @@ The privileged agent is implemented in `app/agent.py`. It owns `/run/nginx-agent
 
 The Flask management API is implemented in `app/main.py`. It serves the management UI shell and health endpoint, exposes mapping list/add/delete/ping REST routes, persists normalized mappings in `/data/mappings.json`, creates a default empty mapping file when needed, auto-assigns ports from `9101`, delegates nginx writes and deletes to the privileged agent over `/run/nginx-agent.sock`, and only persists changes after successful agent operations. The ping endpoint uses Python's standard HTTPS client with the mounted client certificate and key. API tests cover persistence, automatic port selection, duplicate rejection, agent failure handling, delete behavior, ping responses, socket communication, and client-certificate setup.
 
+The management UI is implemented in `app/templates/index.html` as a single-page internal admin surface. It loads mappings from the REST API, shows the current mapping table, provides the add form with optional port override, supports per-row ping and delete actions, displays inline feedback, tracks API health, and refreshes health and mapping status every 30 seconds. A Flask template test covers the rendered UI shell.
+
 ## Implementation Plan
 
 ### 1. Project foundation
@@ -54,10 +56,10 @@ Status: complete.
 
 ### 5. Management UI
 
-Status: pending.
+Status: complete.
 
-- Implement `app/templates/index.html` as a single-page management interface.
-- Provide the mappings table, add form, delete action, ping action, inline status feedback, and 30-second status refresh.
+- `app/templates/index.html` implements the single-page management interface.
+- The UI provides the mappings table, add form, delete action, ping action, inline status feedback, and 30-second status refresh.
 - Keep the UI simple and operational, since this is an internal loopback-only admin surface.
 
 ### 6. Container and deployment integration
@@ -80,8 +82,8 @@ Status: in progress across implementation steps.
 - API tests run successfully inside the project Docker image where Flask is installed.
 - A disposable container HTTP smoke test verifies health, default mapping-file creation, mapping add through the real Flask app and agent socket, generated nginx config creation, `nginx -t`, mapping deletion, config removal, and persisted JSON cleanup.
 - The local Python test suite passes with the Flask-specific test module skipped when Flask is not installed locally.
-- The management UI flow remains to be verified once the browser interface is implemented.
+- The rendered management UI is smoke-tested through Flask and served successfully from a disposable container.
 
 ## Current Next Step
 
-Implement the management UI in `app/templates/index.html`.
+Implement container and deployment integration.
