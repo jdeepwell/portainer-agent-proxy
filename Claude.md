@@ -10,3 +10,6 @@ When asked to via "update spec", update the Spec.md file with all changes talked
 
 This project is to be hosted on GitHub under the repository [portainer-agent-proxy](https://github.com/jdeepwell/portainer-agent-proxy)
  
+ Do NOT change Claude.md or Agents.md - I will manage those files myself.
+
+ 
