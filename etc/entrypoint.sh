@@ -37,4 +37,6 @@ else
     exit 1
 fi
 
+python3 /app/bootstrap_mappings.py
+
 exec supervisord -c /etc/supervisord.conf
