@@ -22,7 +22,10 @@ class NginxManagerTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("listen 9101;", content)
+        self.assertIn("listen 9101 ssl;", content)
+        self.assertIn("ssl_certificate             /data/server-certs/proxy.crt;", content)
+        self.assertIn("ssl_certificate_key         /data/server-certs/proxy.key;", content)
+        self.assertIn("ssl_protocols               TLSv1.2 TLSv1.3;", content)
         self.assertIn("proxy_pass                    https://portainer-agent.example.com;", content)
         self.assertIn("proxy_ssl_certificate         /certs/client.cert;", content)
         self.assertIn("proxy_ssl_certificate_key     /certs/client.key;", content)
@@ -37,8 +40,12 @@ class NginxManagerTests(unittest.TestCase):
             {"port": 9102, "remote_url": "https://agent.example.com"},
             cert_path="/data/certs/client.cert",
             key_path="/data/certs/client.key",
+            server_cert_path="/tmp/proxy.crt",
+            server_key_path="/tmp/proxy.key",
         )
 
+        self.assertIn("ssl_certificate             /tmp/proxy.crt;", content)
+        self.assertIn("ssl_certificate_key         /tmp/proxy.key;", content)
         self.assertIn("proxy_ssl_certificate         /data/certs/client.cert;", content)
         self.assertIn("proxy_ssl_certificate_key     /data/certs/client.key;", content)
 

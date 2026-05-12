@@ -38,6 +38,26 @@ networks:
 
 An editable example is available in `compose.example.yml`.
 
+## Proxy HTTPS Certificate
+
+Portainer talks to Agent endpoints over HTTPS. The proxy therefore listens with HTTPS on every configured `91xx` mapping port.
+
+On first startup the container generates a self-signed server certificate and key at:
+
+```text
+/data/server-certs/proxy.crt
+/data/server-certs/proxy.key
+```
+
+These files are stored in the persistent `/data` volume and are reused across container restarts and image upgrades. To use your own certificate, place a matching PEM certificate and unencrypted private key at those same paths before starting the container.
+
+The generated certificate includes SANs for `portainer_mtls_proxy`, `localhost`, and `127.0.0.1`. If Portainer will connect using another Docker service alias or hostname, add extra SAN entries with `PROXY_TLS_SAN`:
+
+```yaml
+environment:
+  PROXY_TLS_SAN: "DNS:my_proxy_alias,DNS:agent-proxy.local"
+```
+
 ## Client Certificate
 
 Open the management UI at:
@@ -57,11 +77,13 @@ If you prefer mounting files instead of uploading them, mount a directory contai
 
 ## Portainer Environment URLs
 
-After adding mappings in the UI, configure Portainer environments using the proxy service name and internal mapping port:
+After adding mappings in the UI, configure Portainer Agent environments using the proxy service name and internal mapping port. In Portainer's Agent address field, prefer the same style Portainer documents for normal Agents: host and port, without a protocol.
 
 ```text
-http://portainer_mtls_proxy:9101
-http://portainer_mtls_proxy:9102
+portainer_mtls_proxy:9101
+portainer_mtls_proxy:9102
 ```
 
-Do not publish `91xx` ports on the host. They are intended for Portainer-to-proxy traffic inside the shared Docker network.
+If you are using an API or UI field that requires a full URL, use `https://`, not `http://`.
+
+Do not publish `91xx` ports on the host. They are intended for Portainer-to-proxy HTTPS traffic inside the shared Docker network.

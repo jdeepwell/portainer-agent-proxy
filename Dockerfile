@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN set -eux; \
     apk add --no-cache \
+        openssl \
         supervisor \
         python3 \
         py3-flask; \

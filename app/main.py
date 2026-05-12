@@ -310,6 +310,13 @@ def ping_remote(remote_url: str) -> dict:
         with urlopen(request_context, timeout=PING_TIMEOUT_SECONDS, context=context) as response:
             return {"status": "ok", "reachable": True, "code": response.status}
     except HTTPError as exc:
+        if exc.code == 403:
+            return {
+                "status": "ok",
+                "reachable": True,
+                "code": exc.code,
+                "message": "agent rejected unsigned ping request",
+            }
         return {"status": "http_error", "reachable": True, "code": exc.code, "error": str(exc)}
     except (OSError, URLError, ssl.SSLError) as exc:
         return {"status": "error", "reachable": False, "error": str(exc)}

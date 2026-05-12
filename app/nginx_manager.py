@@ -19,6 +19,9 @@ KEY_PATH = Path("/certs/client.key")
 DATA_CERT_DIR = Path("/data/certs")
 UPLOADED_CERT_PATH = DATA_CERT_DIR / "client.cert"
 UPLOADED_KEY_PATH = DATA_CERT_DIR / "client.key"
+SERVER_CERT_DIR = Path("/data/server-certs")
+SERVER_CERT_PATH = SERVER_CERT_DIR / "proxy.crt"
+SERVER_KEY_PATH = SERVER_CERT_DIR / "proxy.key"
 NGINX_BIN = "/usr/sbin/nginx"
 NGINX_GROUP = "nginx"
 PORT_MIN = 9101
@@ -162,6 +165,8 @@ def generate_server_block(
     *,
     cert_path: Path | str | None = None,
     key_path: Path | str | None = None,
+    server_cert_path: Path | str | None = None,
+    server_key_path: Path | str | None = None,
 ) -> str:
     """Generate a deterministic nginx server block for a mapping."""
 
@@ -170,9 +175,15 @@ def generate_server_block(
         active_cert_path, active_key_path = active_client_cert_paths()
         cert_path = active_cert_path if cert_path is None else cert_path
         key_path = active_key_path if key_path is None else key_path
+    server_cert_path = Path(server_cert_path or SERVER_CERT_PATH)
+    server_key_path = Path(server_key_path or SERVER_KEY_PATH)
 
     return f"""server {{
-    listen {normalized.port};
+    listen {normalized.port} ssl;
+
+    ssl_certificate             {server_cert_path};
+    ssl_certificate_key         {server_key_path};
+    ssl_protocols               TLSv1.2 TLSv1.3;
 
     location / {{
         proxy_pass                    {normalized.remote_url};

@@ -304,6 +304,31 @@ class MainApiTests(unittest.TestCase):
             result,
         )
 
+    @patch("app.main.urlopen")
+    @patch("app.main.ssl.create_default_context")
+    def test_ping_remote_treats_agent_forbidden_as_ok(self, create_context_mock, urlopen_mock):
+        context = Mock()
+        create_context_mock.return_value = context
+        urlopen_mock.side_effect = main.HTTPError(
+            url="https://agent.example.com",
+            code=403,
+            msg="Forbidden",
+            hdrs={},
+            fp=None,
+        )
+
+        result = main.ping_remote("https://agent.example.com")
+
+        self.assertEqual(
+            {
+                "status": "ok",
+                "reachable": True,
+                "code": 403,
+                "message": "agent rejected unsigned ping request",
+            },
+            result,
+        )
+
 
 class FakeAgentClient:
     def __init__(self, response: bytes):
