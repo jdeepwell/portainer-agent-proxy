@@ -1,16 +1,27 @@
-# portainer-agent-proxy
-A proxy to connect a local Portainer instance to remote Portainer agents behind a reverse proxy, protecting the agents with mTLS (client cert).
+# Portainer Agent Proxy
+
+A proxy to connect a local Portainer instance to remote Portainer Agent instances behind a reverse proxy, protecting the agents with mTLS (client cert).
+
+## Why I created this
 
 I prefer to run my Portainer instance locally on my developer machine and would like to manage the Docker instances on all my servers from there. But having Docker Agent accessible over the internet on my remote servers doesn't feel comfortable. I wanted to hide the Portainer agent behind a reverse proxy that requires mTLS for connecting. Unfortunately, Portainer does not support this, at least not in the Community Edition.
 
 So I created this Portainer Agent Proxy that runs in the same Docker stack as my local Portainer and pipes the connections through to the remote agents, establishing the mTLS client certificate.
 
-The agent exports one port for the web UI to configure the mappings to the remote server. It automatically adds ports for each mapping that Portainer can connect to.
+<p align="center" style="margin-bottom: 50px;">
+    <img src="assets/diagram_1.png" width="700"><br />
+    <i>Components of the infrastructure in which the Portainer Agent Proxy can be used. </i>
+</p>
 
+## WebUI
+
+The agent exports one port for the web UI to configure the mappings to the remote server. It automatically adds ports for each mapping that Portainer can connect to. The WebUI can be used to manage the mappings for several remote Portainer agents and to manage the mTLS certificate and key. 
 
 <p align="center">
-    <img src="assets/image.png">
+    <img src="assets/screenshot_1.png" width="700"><br />
+    <i>The Portainer Agent Proxy management UI.</i>
 </p>
+
 
 ## Image
 
