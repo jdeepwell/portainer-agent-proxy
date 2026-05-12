@@ -5,13 +5,10 @@ SERVER_CERT_DIR=/data/server-certs
 SERVER_CERT_PATH="$SERVER_CERT_DIR/proxy.crt"
 SERVER_KEY_PATH="$SERVER_CERT_DIR/proxy.key"
 
-mkdir -p /data "$SERVER_CERT_DIR" /run /nginx/conf.d
-chown www-data:www-data /data
+mkdir -p /data "$SERVER_CERT_DIR" /data/nginx/conf.d /run
+chown root:root /data /data/nginx /data/nginx/conf.d
 chmod 755 /data
-
-if [ -f /data/mappings.json ]; then
-    chown www-data:www-data /data/mappings.json
-fi
+chmod 755 /data/nginx /data/nginx/conf.d
 
 if [ -f "$SERVER_CERT_PATH" ] && [ -f "$SERVER_KEY_PATH" ]; then
     :
@@ -36,7 +33,5 @@ else
     echo "ERROR: inbound TLS requires both $SERVER_CERT_PATH and $SERVER_KEY_PATH" >&2
     exit 1
 fi
-
-python3 /app/bootstrap_mappings.py
 
 exec supervisord -c /etc/supervisord.conf

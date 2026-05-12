@@ -38,6 +38,17 @@ networks:
 
 An editable example is available in `compose.example.yml`.
 
+## Mapping Configuration
+
+The mapping configuration is stored directly as managed nginx config files in the persistent `/data` volume:
+
+```text
+/data/nginx/conf.d/9101.conf
+/data/nginx/conf.d/9102.conf
+```
+
+The management UI reads these files to display current mappings, and the privileged agent validates and writes them when mappings are added or removed. There is no separate mapping database or JSON file.
+
 ## Proxy HTTPS Certificate
 
 Portainer talks to Agent endpoints over HTTPS. The proxy therefore listens with HTTPS on every configured `91xx` mapping port.

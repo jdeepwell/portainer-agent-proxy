@@ -22,6 +22,7 @@ class NginxManagerTests(unittest.TestCase):
             }
         )
 
+        self.assertTrue(content.startswith('# portainer-agent-proxy {"name":"hetzner-1","version":1}\n'))
         self.assertIn("listen 9101 ssl;", content)
         self.assertIn("ssl_certificate             /data/server-certs/proxy.crt;", content)
         self.assertIn("ssl_certificate_key         /data/server-certs/proxy.key;", content)
@@ -34,6 +35,47 @@ class NginxManagerTests(unittest.TestCase):
         self.assertIn("proxy_set_header              Upgrade    $http_upgrade;", content)
         self.assertIn('proxy_set_header              Connection "upgrade";', content)
         self.assertTrue(content.endswith("\n"))
+
+    def test_parse_mapping_config_reads_managed_config(self):
+        content = nginx_manager.generate_server_block(
+            {
+                "port": 9101,
+                "name": "hetzner-1",
+                "remote_url": "https://portainer-agent.example.com",
+            }
+        )
+
+        mapping = nginx_manager.parse_mapping_config(content, expected_port=9101)
+
+        self.assertEqual(9101, mapping.port)
+        self.assertEqual("hetzner-1", mapping.name)
+        self.assertEqual("https://portainer-agent.example.com", mapping.remote_url)
+
+    def test_parse_mapping_config_rejects_unmanaged_or_mismatched_config(self):
+        with self.assertRaises(nginx_manager.MappingConfigParseError):
+            nginx_manager.parse_mapping_config("server { listen 9101 ssl; }")
+
+        content = nginx_manager.generate_server_block(
+            {"port": 9101, "remote_url": "https://agent.example.com"}
+        )
+        with self.assertRaises(nginx_manager.MappingConfigParseError):
+            nginx_manager.parse_mapping_config(content, expected_port=9102)
+
+    def test_list_mapping_configs_reads_only_managed_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "9102.conf").write_text(
+                nginx_manager.generate_server_block(
+                    {"port": 9102, "name": "two", "remote_url": "https://two.example.com"}
+                ),
+                encoding="utf-8",
+            )
+            (temp_path / "custom.conf").write_text("server { listen 9443; }\n", encoding="utf-8")
+
+            mappings = nginx_manager.list_mapping_configs(temp_path)
+
+            self.assertEqual([9102], [mapping.port for mapping in mappings])
+            self.assertEqual("two", mappings[0].name)
 
     def test_generate_server_block_accepts_explicit_client_certificate_paths(self):
         content = nginx_manager.generate_server_block(
@@ -129,6 +171,7 @@ class NginxManagerTests(unittest.TestCase):
 
             self.assertEqual(Path(temp_dir) / "9103.conf", target)
             self.assertIn("proxy_pass                    https://agent.example.com;", target.read_text())
+            self.assertEqual(0o644, stat.S_IMODE(target.stat().st_mode))
             self.assertEqual(["nginx", "-t"], run_mock.call_args.args[0][:2])
             self.assertFalse(run_mock.call_args.kwargs.get("shell", False))
 

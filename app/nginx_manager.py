@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import grp
+import json
+import re
 import shutil
 import ssl
 import subprocess
@@ -13,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 
-CONF_DIR = Path("/nginx/conf.d")
+CONF_DIR = Path("/data/nginx/conf.d")
 CERT_PATH = Path("/certs/client.cert")
 KEY_PATH = Path("/certs/client.key")
 DATA_CERT_DIR = Path("/data/certs")
@@ -26,6 +28,8 @@ NGINX_BIN = "/usr/sbin/nginx"
 NGINX_GROUP = "nginx"
 PORT_MIN = 9101
 PORT_MAX = 9199
+MANAGED_CONFIG_PREFIX = "# portainer-agent-proxy "
+MANAGED_CONFIG_VERSION = 1
 
 
 class NginxManagerError(Exception):
@@ -46,6 +50,10 @@ class NginxReloadError(NginxManagerError, RuntimeError):
 
 class CertificateValidationError(NginxManagerError, ValueError):
     """Raised when an uploaded certificate/key pair is invalid."""
+
+
+class MappingConfigParseError(NginxManagerError, ValueError):
+    """Raised when a managed nginx mapping config cannot be parsed."""
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,71 @@ def config_path(port: int | str, conf_dir: Path | str = CONF_DIR) -> Path:
     return Path(conf_dir) / f"{safe_port}.conf"
 
 
+def list_mapping_configs(conf_dir: Path | str = CONF_DIR) -> list[Mapping]:
+    """Return mappings parsed from managed nginx config files."""
+
+    path = Path(conf_dir)
+    if not path.exists():
+        return []
+
+    mappings = []
+    for config in sorted(path.glob("*.conf")):
+        try:
+            expected_port = int(config.stem)
+        except ValueError:
+            continue
+
+        content = config.read_text(encoding="utf-8")
+        if not is_managed_config(content):
+            continue
+        mappings.append(parse_mapping_config(content, expected_port=expected_port))
+
+    return sorted(mappings, key=lambda item: item.port)
+
+
+def is_managed_config(content: str) -> bool:
+    """Return whether content is a proxy-managed nginx mapping config."""
+
+    return isinstance(content, str) and content.startswith(MANAGED_CONFIG_PREFIX)
+
+
+def parse_mapping_config(content: str, *, expected_port: int | None = None) -> Mapping:
+    """Parse a mapping from a deterministic proxy-managed nginx config."""
+
+    if not is_managed_config(content):
+        raise MappingConfigParseError("config is not managed by portainer-agent-proxy")
+
+    first_line = content.splitlines()[0]
+    metadata_raw = first_line.removeprefix(MANAGED_CONFIG_PREFIX)
+    try:
+        metadata = json.loads(metadata_raw)
+    except json.JSONDecodeError as exc:
+        raise MappingConfigParseError(f"managed config metadata is invalid: {exc}") from exc
+
+    if not isinstance(metadata, dict) or metadata.get("version") != MANAGED_CONFIG_VERSION:
+        raise MappingConfigParseError("managed config metadata version is unsupported")
+    name = metadata.get("name", "")
+    if not isinstance(name, str):
+        raise MappingConfigParseError("managed config metadata name must be a string")
+
+    listen_matches = re.findall(r"^\s*listen\s+([0-9]+)\s+ssl;\s*$", content, re.MULTILINE)
+    if len(listen_matches) != 1:
+        raise MappingConfigParseError("managed config must contain exactly one ssl listen directive")
+    port = validate_port(listen_matches[0])
+    if expected_port is not None and port != validate_port(expected_port):
+        raise MappingConfigParseError("managed config filename and listen port do not match")
+
+    proxy_pass_matches = re.findall(r"^\s*proxy_pass\s+([^;\s]+);\s*$", content, re.MULTILINE)
+    if len(proxy_pass_matches) != 1:
+        raise MappingConfigParseError("managed config must contain exactly one proxy_pass directive")
+
+    return Mapping(
+        port=port,
+        name=name.strip(),
+        remote_url=normalize_remote_url(proxy_pass_matches[0]),
+    )
+
+
 def active_client_cert_paths(
     *,
     uploaded_cert_path: Path | str | None = None,
@@ -178,7 +251,15 @@ def generate_server_block(
     server_cert_path = Path(server_cert_path or SERVER_CERT_PATH)
     server_key_path = Path(server_key_path or SERVER_KEY_PATH)
 
-    return f"""server {{
+    metadata = json.dumps(
+        {"version": MANAGED_CONFIG_VERSION, "name": normalized.name},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    return f"""{MANAGED_CONFIG_PREFIX}{metadata}
+server {{
     listen {normalized.port} ssl;
 
     ssl_certificate             {server_cert_path};
@@ -308,6 +389,7 @@ def write_config_content(
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o644)
         os.replace(temp_name, target)
     except Exception:
         Path(temp_name).unlink(missing_ok=True)

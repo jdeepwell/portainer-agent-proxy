@@ -18,7 +18,7 @@ Browser ──► Management UI (port 9200, loopback only)
                     ↓
            Unix socket /run/nginx-agent.sock
                     ↓
-           Agent (root): writes /nginx/conf.d/ + reloads nginx
+           Agent (root): writes /data/nginx/conf.d/ + reloads nginx
 ```
 
 Both Portainer CE and the proxy run in the same Docker Compose stack on a shared private bridge network. Portainer connects to the proxy using the Docker service name and port (e.g. `portainer_mtls_proxy:9101` in the Agent address field, or `https://portainer_mtls_proxy:9101` when a full URL is required). Agent proxy ports are not exposed to the host. Only the management UI port is exposed, bound to the host loopback interface.
@@ -64,15 +64,15 @@ No PHP, no fcgiwrap, no additional runtimes beyond the above.
 │   └── templates/
 │       └── index.html           # Single-page management UI
 ├── nginx/
-│   ├── nginx.conf               # Base nginx config (static, includes conf.d/*)
-│   └── conf.d/                  # Dynamically generated per-mapping server blocks
-│       ├── 9101.conf
-│       └── 9102.conf
+│   └── nginx.conf               # Base nginx config (static, includes /data/nginx/conf.d/*)
 ├── certs/                       # Optional mounted read-only cert fallback from host
 │   ├── client.cert
 │   └── client.key
 ├── data/
-│   ├── mappings.json            # Persisted mapping configuration
+│   ├── nginx/
+│   │   └── conf.d/              # Persisted managed per-mapping nginx server blocks
+│   │       ├── 9101.conf
+│   │       └── 9102.conf
 │   ├── server-certs/            # Persisted HTTPS certificate presented to Portainer
 │   │   ├── proxy.crt
 │   │   └── proxy.key
@@ -97,8 +97,8 @@ No PHP, no fcgiwrap, no additional runtimes beyond the above.
 - Installs `openssl`, `supervisor`, `python3`, and Flask via `apk` or `pip`
 - Creates `www-data` user for the web app process
 - Copies all application files into the image
-- Creates `/nginx/conf.d/`, `/data/`, `/run/`, and `/certs/` directories as needed
-- Uses `/etc/entrypoint.sh` as the container command. The entrypoint prepares runtime directories, ensures `/data` and `/data/mappings.json` are writable by `www-data` when a fresh Docker volume is mounted, generates the persisted inbound HTTPS server certificate when missing, and then starts `supervisord`.
+- Creates `/data/nginx/conf.d/`, `/data/`, `/run/`, and `/certs/` directories as needed
+- Uses `/etc/entrypoint.sh` as the container command. The entrypoint prepares runtime directories, ensures `/data/nginx/conf.d/` exists and is readable by the web app, generates the persisted inbound HTTPS server certificate when missing, and then starts `supervisord`.
 
 ---
 
@@ -112,32 +112,30 @@ No PHP, no fcgiwrap, no additional runtimes beyond the above.
 
 ---
 
-## Mapping Configuration (`/data/mappings.json`)
+## Mapping Configuration (`/data/nginx/conf.d/*.conf`)
 
-Persists the port-to-remote-URL mappings across container restarts.
+Mapping configuration is stored directly as managed nginx configuration files under the persistent `/data` volume. These files are the single source of truth for mappings. There is no separate mapping database or JSON file.
 
-**Schema:**
-```json
-{
-  "mappings": [
-    {
-      "port": 9101,
-      "name": "hetzner-1",
-      "remote_url": "https://portainer-agent.hetzner-1.example.com"
-    },
-    {
-      "port": 9102,
-      "name": "world4you-1",
-      "remote_url": "https://portainer-agent.world4you-1.example.com"
-    }
-  ]
-}
+Example:
+
+```text
+/data/nginx/conf.d/9101.conf
+/data/nginx/conf.d/9102.conf
 ```
 
-**Fields:**
-- `port` (integer): the local port nginx will listen on for this mapping
-- `name` (string): a human-readable label for the remote agent
-- `remote_url` (string): the full HTTPS URL of the remote Apache reverse proxy endpoint
+Each managed config file contains:
+
+- A metadata comment starting with `# portainer-agent-proxy ` containing compact JSON with `version` and `name`.
+- A single nginx `server` block.
+- A `listen <port> ssl;` directive whose port must match the filename.
+- A single `proxy_pass <remote_url>;` directive.
+
+The management UI reads current mappings by parsing only files with the managed metadata marker. Unmanaged `*.conf` files are ignored by the UI, but still included by nginx and validated as part of the total config set.
+
+**Fields represented by each managed config:**
+- `port` (integer): the local HTTPS port nginx listens on for this mapping
+- `name` (string): a human-readable label stored in the metadata comment
+- `remote_url` (string): the full HTTPS URL of the remote Apache reverse proxy endpoint, stored in `proxy_pass`
 
 ---
 
@@ -163,7 +161,7 @@ If both uploaded files exist under `/data/certs/`, nginx config generation and t
 
 Uploaded certificates are installed by the privileged root agent, not written directly by the unprivileged Flask web app. The agent validates the certificate and private key as a matching usable pair before replacing the active uploaded files. Certificate writes are atomic. The uploaded certificate file is readable by the nginx process, while the uploaded private key is installed with restrictive permissions suitable for nginx to read it without making it world-readable.
 
-The `/data` directory must be backed by a Docker volume or host bind mount in production. With a persistent `/data` volume, both `mappings.json` and uploaded certificate files survive container recreation and image upgrades. If no persistent `/data` mount is configured, uploaded certificates and mappings are lost when the container is replaced.
+The `/data` directory must be backed by a Docker volume or host bind mount in production. With a persistent `/data` volume, managed mapping configs, inbound HTTPS certificates, and uploaded client certificate files survive container recreation and image upgrades. If no persistent `/data` mount is configured, uploaded certificates and mappings are lost when the container is replaced.
 
 ---
 
@@ -205,15 +203,16 @@ User-managed inbound certificates are supported by placing a PEM certificate and
 
 Static base configuration. Must include:
 ```nginx
-include /nginx/conf.d/*.conf;
+include /data/nginx/conf.d/*.conf;
 ```
 Never modified at runtime.
 
-### `/nginx/conf.d/<port>.conf`
+### `/data/nginx/conf.d/<port>.conf`
 
-One file per mapping, generated dynamically by the agent. Each file contains a single `server` block:
+One file per mapping, generated dynamically by the agent and persisted under `/data`. Each managed file contains a metadata comment and a single `server` block:
 
 ```nginx
+# portainer-agent-proxy {"name":"my-server","version":1}
 server {
     listen <port> ssl;
 
@@ -255,7 +254,7 @@ nginx uses the system CA bundle to verify remote server certificates (Let's Encr
 - Receive instructions to add, update, or remove per-mapping nginx config files
 - Receive instructions to install or replace the global uploaded TLS client certificate and key
 - Validate any new or modified nginx config using `nginx -t` before writing to disk
-- Write validated config fragments to `/nginx/conf.d/<port>.conf`
+- Write validated config fragments to `/data/nginx/conf.d/<port>.conf`
 - Validate uploaded certificate/key pairs before writing them under `/data/certs/`
 - Remove config files for deleted mappings
 - Reload nginx via `nginx -s reload` after any configuration change
@@ -306,7 +305,8 @@ A helper module imported by the agent. Responsibilities:
 - Generate the nginx HTTPS `server` block content for a given mapping (port + remote_url)
 - Resolve the active client certificate paths, preferring uploaded `/data/certs/` files and falling back to mounted `/certs/` files
 - Resolve the inbound HTTPS certificate paths used for the certificate presented to Portainer
-- Determine the correct config file path (`/nginx/conf.d/<port>.conf`)
+- Determine the correct config file path (`/data/nginx/conf.d/<port>.conf`)
+- Parse managed nginx config files back into mapping data for the management API
 - Provide utility functions for writing, deleting, validating (via `nginx -t`), and reloading nginx config
 - Provide utilities for validating and atomically installing uploaded client certificate/key pairs
 
@@ -318,11 +318,10 @@ A helper module imported by the agent. Responsibilities:
 - Run as `www-data`
 - Serve the management UI and REST API using Flask
 - Listen on port `9200`
-- Read current mappings from `/data/mappings.json`
+- Read current mappings from managed nginx config files under `/data/nginx/conf.d/`
 - Read active client certificate status
 - On configuration changes, send the appropriate instruction to the agent via the Unix socket
 - On certificate uploads, send the certificate/key pair to the agent via the Unix socket
-- Persist mapping changes to `/data/mappings.json`
 - Display success or error feedback in the UI
 
 ### Routes

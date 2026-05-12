@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import base64
-import os
 import socket
 import ssl
-import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -20,7 +17,6 @@ except ModuleNotFoundError:
     from app import nginx_manager
 
 
-DATA_PATH = Path("/data/mappings.json")
 SOCKET_PATH = Path("/run/nginx-agent.sock")
 AGENT_TIMEOUT_SECONDS = 10
 PING_TIMEOUT_SECONDS = 5
@@ -46,8 +42,8 @@ class AgentError(ApiError):
     status_code = 502
 
 
-class StorageError(ApiError):
-    """Raised when mapping persistence cannot be read or written."""
+class ConfigReadError(ApiError):
+    """Raised when managed nginx mapping configs cannot be read."""
 
     status_code = 500
 
@@ -85,8 +81,6 @@ def add_mapping():
     config_content = nginx_manager.generate_server_block(mapping)
 
     send_agent_request(f"WRITE {mapping['port']}\n{config_content}END\n")
-    mappings.append(mapping)
-    save_mappings(mappings)
 
     return jsonify({"mapping": mapping}), 201
 
@@ -99,7 +93,6 @@ def delete_mapping(port):
         raise ApiError("mapping not found", 404)
 
     send_agent_request(f"DELETE {safe_port}\nEND\n")
-    save_mappings([mapping for mapping in mappings if mapping["port"] != safe_port])
 
     return jsonify({"status": "deleted", "port": safe_port})
 
@@ -170,47 +163,12 @@ def validate_uploaded_pem_shape(certificate: str, private_key: str) -> None:
         raise ApiError("encrypted private keys are not supported")
 
 
-def load_mappings(data_path: Path | str | None = None) -> list[dict]:
-    path = Path(data_path or DATA_PATH)
-    if not path.exists():
-        save_mappings([], path)
-        return []
-
+def load_mappings(conf_dir: Path | str | None = None) -> list[dict]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise StorageError(f"could not read mappings: {exc}") from exc
-
-    if not isinstance(data, dict) or not isinstance(data.get("mappings"), list):
-        raise StorageError("mappings file must contain a mappings list")
-
-    mappings = [mapping_to_dict(nginx_manager.normalize_mapping(item)) for item in data["mappings"]]
-    return sorted(mappings, key=lambda item: item["port"])
-
-
-def save_mappings(mappings: list[dict], data_path: Path | str | None = None) -> None:
-    path = Path(data_path or DATA_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    normalized = [mapping_to_dict(nginx_manager.normalize_mapping(item)) for item in mappings]
-    normalized = sorted(normalized, key=lambda item: item["port"])
-    data = {"mappings": normalized}
-
-    fd, temp_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, path)
-    except OSError as exc:
-        Path(temp_name).unlink(missing_ok=True)
-        raise StorageError(f"could not write mappings: {exc}") from exc
+        mappings = nginx_manager.list_mapping_configs(conf_dir or nginx_manager.CONF_DIR)
+    except (OSError, nginx_manager.NginxManagerError) as exc:
+        raise ConfigReadError(f"could not read managed nginx mappings: {exc}") from exc
+    return [mapping_to_dict(mapping) for mapping in mappings]
 
 
 def build_mapping(payload: dict, existing_mappings: list[dict]) -> dict:

@@ -1,5 +1,4 @@
 import io
-import json
 import importlib.util
 import tempfile
 import unittest
@@ -20,13 +19,13 @@ class MainApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.temp_path = Path(self.temp_dir.name)
-        self.data_path = self.temp_path / "mappings.json"
+        self.conf_dir = self.temp_path / "nginx" / "conf.d"
         self.uploaded_cert_path = self.temp_path / "certs" / "client.cert"
         self.uploaded_key_path = self.temp_path / "certs" / "client.key"
         self.mounted_cert_path = self.temp_path / "mounted" / "client.cert"
         self.mounted_key_path = self.temp_path / "mounted" / "client.key"
         self.patches = [
-            patch.object(main, "DATA_PATH", self.data_path),
+            patch.object(main.nginx_manager, "CONF_DIR", self.conf_dir),
             patch.object(main.nginx_manager, "UPLOADED_CERT_PATH", self.uploaded_cert_path),
             patch.object(main.nginx_manager, "UPLOADED_KEY_PATH", self.uploaded_key_path),
             patch.object(main.nginx_manager, "CERT_PATH", self.mounted_cert_path),
@@ -43,17 +42,19 @@ class MainApiTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def write_mappings(self, mappings):
-        self.data_path.write_text(json.dumps({"mappings": mappings}), encoding="utf-8")
+        self.conf_dir.mkdir(parents=True, exist_ok=True)
+        for mapping in mappings:
+            content = main.nginx_manager.generate_server_block(mapping)
+            (self.conf_dir / f"{mapping['port']}.conf").write_text(content, encoding="utf-8")
 
     def read_mappings(self):
-        return json.loads(self.data_path.read_text(encoding="utf-8"))["mappings"]
+        return main.load_mappings(self.conf_dir)
 
     def test_get_mappings_returns_empty_list_when_file_is_missing(self):
         response = self.client.get("/api/mappings")
 
         self.assertEqual(200, response.status_code)
         self.assertEqual({"mappings": []}, response.get_json())
-        self.assertEqual([], self.read_mappings())
 
     def test_index_serves_management_ui(self):
         response = self.client.get("/")
@@ -117,7 +118,9 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual(2, send_agent_mock.call_count)
         self.assertTrue(send_agent_mock.call_args_list[0].args[0].startswith("INSTALL_CERTS\n"))
-        self.assertTrue(send_agent_mock.call_args_list[1].args[0].startswith("WRITE 9101\nserver {"))
+        self.assertTrue(
+            send_agent_mock.call_args_list[1].args[0].startswith("WRITE 9101\n# portainer-agent-proxy ")
+        )
 
     @patch("app.main.send_agent_request")
     def test_upload_certificates_rejects_missing_private_key(self, send_agent_mock):
@@ -147,9 +150,8 @@ class MainApiTests(unittest.TestCase):
             response.get_json()["mapping"],
         )
         message = send_agent_mock.call_args.args[0]
-        self.assertTrue(message.startswith("WRITE 9101\nserver {"))
+        self.assertTrue(message.startswith("WRITE 9101\n# portainer-agent-proxy "))
         self.assertTrue(message.endswith("END\n"))
-        self.assertEqual([response.get_json()["mapping"]], self.read_mappings())
 
     @patch("app.main.send_agent_request")
     def test_post_mapping_uses_next_available_port(self, _send_agent_mock):
@@ -208,10 +210,6 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual({"status": "deleted", "port": 9101}, response.get_json())
         send_agent_mock.assert_called_once_with("DELETE 9101\nEND\n")
-        self.assertEqual(
-            [{"port": 9102, "name": "two", "remote_url": "https://two.example.com"}],
-            self.read_mappings(),
-        )
 
     @patch("app.main.send_agent_request")
     def test_delete_mapping_does_not_persist_when_agent_fails(self, send_agent_mock):
